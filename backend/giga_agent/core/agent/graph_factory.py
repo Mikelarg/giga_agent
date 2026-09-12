@@ -198,8 +198,7 @@ def _is_feature_enabled_for_provider(
 
 
 def _generate_user_info(state: AgentState) -> str:
-    # TODO: Вынести язык пользователя в явные пользовательские настройки
-    language = "ru"
+    language = get_settings().giga_agent_language
     language_prompt = ""
     if not language.startswith("ru"):
         language_prompt = f"\nВыбранный язык пользователя: {language}\n"
@@ -668,7 +667,10 @@ def create_graph(
         # terminal assistant message instead of invoking the model again. The
         # message has no tool calls, so _make_model_to_tools_edge routes it to
         # the end of the graph.
-        loop_reason = detect_loop(strip_context_summaries(state["messages"]))
+        configurable = (config or {}).get("configurable") or {}
+        loop_reason = None
+        if not configurable.get("disable_anti_loop", False):
+            loop_reason = detect_loop(strip_context_summaries(state["messages"]))
         if loop_reason:
             logger.warning("Anti-loop triggered, stopping run: %s", loop_reason)
             stop_message = AIMessage(

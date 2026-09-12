@@ -5,6 +5,8 @@ import json
 import os
 import re
 import signal
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -72,7 +74,12 @@ def _config_with_cli_turn_flags(
 
 
 def _make_cli_thread_config(
-    *, thread_id: str, checkpointer, user_id: str, no_python_tool: bool = False
+    *,
+    thread_id: str,
+    checkpointer,
+    user_id: str,
+    no_python_tool: bool = False,
+    disable_anti_loop: bool = False,
 ) -> dict[str, Any]:
     from langgraph.constants import CONFIG_KEY_CHECKPOINTER
 
@@ -82,6 +89,7 @@ def _make_cli_thread_config(
             CONFIG_KEY_CHECKPOINTER: checkpointer,
             "langgraph_auth_user": {"identity": user_id, "token": ""},
             "no_python_tool": no_python_tool,
+            "disable_anti_loop": disable_anti_loop,
         }
     }
 
@@ -178,10 +186,14 @@ class _ChatState:
     __slots__ = (
         "approve",
         "debug",
+        "jsonl",
         "plan_mode_pending",
         "subagent_statuses",
         "displayed_tool_call_ids",
         "pending_tool_call_chunks",
+        "current_message_id",
+        "current_message_has_tool_call",
+        "current_turn_id",
     )
 
     def __init__(
@@ -189,13 +201,34 @@ class _ChatState:
         approve: bool,
         debug: bool,
         plan_mode_pending: bool = False,
+        jsonl: bool = False,
     ) -> None:
         self.approve = approve
         self.debug = debug
+        self.jsonl = jsonl
         self.plan_mode_pending = plan_mode_pending
         self.subagent_statuses = {}
         self.displayed_tool_call_ids: set[str] = set()
         self.pending_tool_call_chunks: dict[str, dict[str, Any]] = {}
+        self.current_message_id: str | None = None
+        self.current_message_has_tool_call = False
+        self.current_turn_id: str | None = None
+
+
+def _emit_cli_json_event(state: _ChatState, event: dict[str, Any]) -> None:
+    """Write one structured CLI event without Rich/ANSI formatting.
+
+    JSONL is deliberately stdout-only. Diagnostics from the CLI stay on stderr,
+    which lets benchmark adapters persist the two streams independently.
+    """
+    if not state.jsonl:
+        return
+    payload = {
+        "schema": "giga-agent.cli.event.v1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **event,
+    }
+    print(json.dumps(payload, ensure_ascii=False, default=str), flush=True)
 
 
 def _make_toggle_keybindings(state: _ChatState):
@@ -530,6 +563,41 @@ def _merge_stream_content(collected_text: str, content: str) -> tuple[str, str]:
     return collected_text + content, content
 
 
+def _reasoning_text(value: Any) -> str:
+    """Extract printable reasoning text from provider-specific payloads."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "content", "reasoning_content", "reasoning"):
+            text = _reasoning_text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        parts = [_reasoning_text(item) for item in value]
+        return "".join(part for part in parts if part)
+    return ""
+
+
+def _extract_reasoning_content(message: Any) -> str:
+    """Read reasoning_content without assuming a particular LLM provider."""
+    additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+    for key in ("reasoning_content", "reasoning"):
+        reasoning = _reasoning_text(additional_kwargs.get(key))
+        if reasoning:
+            return reasoning
+
+    # Newer LangChain integrations can expose OpenAI-style content blocks.
+    for block in getattr(message, "content_blocks", None) or []:
+        block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+        if block_type not in {"reasoning", "thinking"}:
+            continue
+        reasoning = _reasoning_text(block)
+        if reasoning:
+            return reasoning
+    return ""
+
+
 def _extract_subagent_activity_event(event) -> dict[str, Any] | None:
     if not isinstance(event, tuple) or len(event) != 2 or event[0] != "custom":
         return None
@@ -737,15 +805,19 @@ def _stop_supervised_processes_once(
     *,
     stop_state: dict[str, bool],
     reason: str,
+    keep_background_processes: bool = False,
+    quiet: bool = False,
 ) -> None:
     if stop_state.get("done"):
         return
     stop_state["done"] = True
+    if keep_background_processes:
+        return
     try:
         stopped = get_process_supervisor().stop_all()
     except Exception:
         return
-    if stopped:
+    if stopped and not quiet:
         console = _make_console()
         console.print(
             f"[dim]Stopped {len(stopped)} managed subprocess(es) during {reason}.[/dim]"
@@ -761,6 +833,7 @@ async def _chat_loop(
     prompt: str | None = None,
     plan_mode: bool = False,
     no_python_tool: bool = False,
+    disable_anti_loop: bool = False,
     python_executor: str = "worker",
 ) -> None:
     from giga_agent.core.agent.runtime_resolver import RuntimeResolver
@@ -784,6 +857,7 @@ async def _chat_loop(
         checkpointer=checkpointer,
         user_id=str(user.id),
         no_python_tool=no_python_tool,
+        disable_anti_loop=disable_anti_loop,
     )
     if prompt is not None:
         config = dict(config)
@@ -791,8 +865,14 @@ async def _chat_loop(
         metadata["cli_prompt_mode"] = True
         config["metadata"] = metadata
 
-    console.print("[bold green]GigaAgent CLI[/bold green]")
-    console.print(f"Thread: {thread_id}")
+    if state.jsonl:
+        _emit_cli_json_event(
+            state,
+            {"type": "session_started", "thread_id": thread_id},
+        )
+    else:
+        console.print("[bold green]GigaAgent CLI[/bold green]")
+        console.print(f"Thread: {thread_id}")
     if prompt is not None:
         prepared_turn = _prepare_cli_turn(
             prompt,
@@ -809,7 +889,10 @@ async def _chat_loop(
         if prepared_turn.get("consumes_plan_mode_pending"):
             state.plan_mode_pending = False
         try:
-            if _is_cli_context_compaction_turn(prepared_turn["config"]):
+            if (
+                _is_cli_context_compaction_turn(prepared_turn["config"])
+                and not state.jsonl
+            ):
                 with console.status(
                     "[cyan]Chat summarization in progress...[/cyan]",
                     spinner="dots",
@@ -831,12 +914,18 @@ async def _chat_loop(
                     state,
                     render_markdown,
                 )
-            if _is_cli_context_compaction_turn(prepared_turn["config"]):
+            if (
+                _is_cli_context_compaction_turn(prepared_turn["config"])
+                and not state.jsonl
+            ):
                 await _print_context_compaction_status(
                     console, graph, prepared_turn["config"]
                 )
         except (KeyboardInterrupt, asyncio.CancelledError):
-            console.print("\n[dim]Interrupted.[/dim]")
+            if state.jsonl:
+                _emit_cli_json_event(state, {"type": "interrupted"})
+            else:
+                console.print("\n[dim]Interrupted.[/dim]")
         return
 
     console.print("Type your message. Press Ctrl+C or Ctrl+D to exit.")
@@ -892,6 +981,7 @@ async def _chat_loop(
                     checkpointer=checkpointer,
                     user_id=str(user.id),
                     no_python_tool=no_python_tool,
+                    disable_anti_loop=disable_anti_loop,
                 )
                 console.print(
                     f"[yellow]Начат новый чат.[/yellow] [dim]Thread: {thread_id}[/dim]"
@@ -945,13 +1035,48 @@ async def _stream_raw_tokens(
     from langchain_core.messages import AIMessageChunk, ToolMessage
 
     collected_text = ""
+    collected_reasoning = ""
+    message_index = 1
+    state.current_message_id = (
+        f"{state.current_turn_id or uuid4()}:ai:{message_index}"
+    )
+    state.current_message_has_tool_call = False
+    assistant_message_emitted = False
+
+    def emit_assistant_message() -> None:
+        nonlocal assistant_message_emitted
+        if assistant_message_emitted or not state.jsonl:
+            return
+        if not (
+            collected_text
+            or collected_reasoning
+            or state.current_message_has_tool_call
+        ):
+            return
+        event = {
+            "type": "assistant_message",
+            "turn_id": state.current_turn_id,
+            "message_id": state.current_message_id,
+            "content": collected_text,
+        }
+        if collected_reasoning:
+            event["reasoning_content"] = collected_reasoning
+        _emit_cli_json_event(state, event)
+        assistant_message_emitted = True
+
     try:
         async for event in graph.astream(
             input_msg, config, stream_mode=["messages", "custom", "updates"]
         ):
             activity = _extract_subagent_activity_event(event)
             if activity is not None:
-                _handle_subagent_activity(console, state.subagent_statuses, activity)
+                if state.jsonl:
+                    _emit_cli_json_event(
+                        state,
+                        {"type": "subagent_activity", "data": activity},
+                    )
+                else:
+                    _handle_subagent_activity(console, state.subagent_statuses, activity)
                 continue
             update_tool_calls = _extract_cli_update_tool_calls(event)
             if update_tool_calls:
@@ -968,6 +1093,32 @@ async def _stream_raw_tokens(
                 continue
 
             if isinstance(msg, ToolMessage):
+                if state.jsonl:
+                    # The preceding AIMessage is complete when the first tool
+                    # result arrives. All consecutive ToolMessages retain the
+                    # same message_id and therefore stay in the same ATIF step.
+                    emit_assistant_message()
+                    additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                    tool_name = (
+                        additional_kwargs.get("tool_name")
+                        or getattr(msg, "name", None)
+                        or "tool"
+                    )
+                    _emit_cli_json_event(
+                        state,
+                        {
+                            "type": "tool_result",
+                            "turn_id": state.current_turn_id,
+                            "message_id": state.current_message_id,
+                            "call_id": getattr(msg, "tool_call_id", None),
+                            "tool": tool_name,
+                            "content": _format_tool_response_content(
+                                getattr(msg, "content", "")
+                            ),
+                            "is_error": getattr(msg, "status", None) == "error",
+                        },
+                    )
+                    continue
                 if _is_think_tool_message(msg):
                     await _print_think_thoughts_for_tool_message(
                         graph, config, msg, console, render_markdown=False
@@ -978,7 +1129,21 @@ async def _stream_raw_tokens(
                 continue
 
             if isinstance(msg, AIMessageChunk):
+                if assistant_message_emitted:
+                    message_index += 1
+                    state.current_message_id = (
+                        f"{state.current_turn_id or uuid4()}:ai:{message_index}"
+                    )
+                    state.current_message_has_tool_call = False
+                    assistant_message_emitted = False
+                    collected_text = ""
+                    collected_reasoning = ""
                 _print_streamed_tool_calls(console, msg, state, render_markdown=False)
+                reasoning = _extract_reasoning_content(msg)
+                if reasoning:
+                    collected_reasoning, _ = _merge_stream_content(
+                        collected_reasoning, reasoning
+                    )
 
             if isinstance(msg, AIMessageChunk) and msg.content:
                 collected_text, delta = _merge_stream_content(
@@ -987,12 +1152,16 @@ async def _stream_raw_tokens(
                 if not delta:
                     continue
                 if collected_text == delta:
-                    console.print("[bold green]Agent:[/bold green] ", end="")
-                print(delta, end="", flush=True)
+                    if not state.jsonl:
+                        console.print("[bold green]Agent:[/bold green] ", end="")
+                if not state.jsonl:
+                    print(delta, end="", flush=True)
     finally:
         _stop_subagent_statuses(state.subagent_statuses)
 
-    if collected_text:
+    if state.jsonl:
+        emit_assistant_message()
+    elif collected_text:
         print()
     return collected_text
 
@@ -1123,6 +1292,7 @@ async def _stream_and_handle_interrupts(
     approve_prompt_session = None
 
     while True:
+        state.current_turn_id = str(uuid4())
         if render_markdown:
             try:
                 await _stream_with_live_markdown(
@@ -1242,6 +1412,20 @@ def _print_cli_tool_calls(
         if call_id in state.displayed_tool_call_ids:
             continue
         state.displayed_tool_call_ids.add(call_id)
+        if state.jsonl:
+            _emit_cli_json_event(
+                state,
+                {
+                    "type": "tool_call",
+                    "turn_id": state.current_turn_id,
+                    "message_id": state.current_message_id,
+                    "call_id": call_id,
+                    "tool": tool_call.get("name", "tool"),
+                    "arguments": tool_call.get("args") or {},
+                },
+            )
+            state.current_message_has_tool_call = True
+            continue
         if _is_think_tool_call(tool_call):
             _print_think_thoughts(console, tool_call, render_markdown)
         elif state.approve:
@@ -2095,6 +2279,13 @@ def cli_chat(
     approve: Annotated[
         bool, typer.Option("--approve", help="Auto-approve all tool calls")
     ] = False,
+    disable_anti_loop: Annotated[
+        bool,
+        typer.Option(
+            "--disable-anti-loop",
+            help="Disable anti-loop protection for this CLI session.",
+        ),
+    ] = False,
     plan: Annotated[
         bool,
         typer.Option(
@@ -2157,6 +2348,23 @@ def cli_chat(
             help="Disable the Python tool in the REPL.",
         ),
     ] = False,
+    jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--jsonl",
+            help=(
+                "Emit structured JSONL events to stdout instead of Rich output. "
+                "Intended for benchmark adapters and log collectors."
+            ),
+        ),
+    ] = False,
+    keep_background_processes: Annotated[
+        bool,
+        typer.Option(
+            "--keep-background-processes",
+            help="Keep background processes running after the CLI exits.",
+        ),
+    ] = False,
     python_executor: Annotated[
         str,
         typer.Option(
@@ -2169,7 +2377,10 @@ def cli_chat(
     """
     Interactive CLI chat: invoke the agent graph directly (no HTTP server).
     """
-    setup_cli_logging(log_level.value.upper())
+    setup_cli_logging(
+        log_level.value.upper(),
+        stream=sys.stderr if jsonl else None,
+    )
     os.environ.setdefault("GIGA_AGENT_LOG_LEVEL", log_level.value)
 
     # .env → os.environ до чтения настроек (per-service креды берутся os.getenv).
@@ -2217,25 +2428,34 @@ def cli_chat(
     console = _make_console()
     stop_state: dict[str, bool] = {}
 
-    with console.status("[bold green]Loading agent..."):
-        from ._langgraph_config import build_langgraph_runtime_config
+    from ._langgraph_config import build_langgraph_runtime_config
 
-        try:
+    try:
+        if jsonl:
             langgraph_runtime_config = build_langgraph_runtime_config(
                 graph_and_app_path
             )
-        except KeyboardInterrupt:
-            raise typer.Exit(code=130)
+        else:
+            with console.status("[bold green]Loading agent..."):
+                langgraph_runtime_config = build_langgraph_runtime_config(
+                    graph_and_app_path
+                )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
 
-        agent = langgraph_runtime_config["agent"]
-        compiled_graph = agent.graph
+    agent = langgraph_runtime_config["agent"]
+    compiled_graph = agent.graph
 
-    console.print(f"[green]Agent loaded[/green] with {len(agent.all_modules)} modules.")
+    if not jsonl:
+        console.print(
+            f"[green]Agent loaded[/green] with {len(agent.all_modules)} modules."
+        )
 
     chat_state = _ChatState(
         approve=approve or prompt is not None,
         debug=debug,
         plan_mode_pending=plan,
+        jsonl=jsonl,
     )
 
     async def _run() -> None:
@@ -2253,11 +2473,12 @@ def cli_chat(
                     compiled_graph,
                     checkpointer,
                     chat_state,
-                    not no_markdown,
+                    not no_markdown and not jsonl,
                     cli_cwd,
                     prompt,
                     plan_mode=plan,
                     no_python_tool=no_python_tool,
+                    disable_anti_loop=disable_anti_loop,
                     python_executor=normalized_python_executor,
                 )
         finally:
@@ -2276,4 +2497,6 @@ def cli_chat(
         _stop_supervised_processes_once(
             stop_state=stop_state,
             reason="CLI shutdown",
+            keep_background_processes=keep_background_processes,
+            quiet=jsonl,
         )

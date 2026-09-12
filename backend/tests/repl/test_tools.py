@@ -8,6 +8,7 @@ from giga_agent.modules.repl.module import ReplModule, get_user_secrets_prompt
 from giga_agent.modules.repl.tools import (
     _build_attachment_info,
     _extract_upload_specs_from_display_data,
+    _format_python_error_location,
     _resolve_upload_prefix,
     get_user_secret_envs,
     normalize_secret_env_name,
@@ -22,6 +23,15 @@ from giga_agent.core.agent.tool_policy import (
 
 
 class ReplToolsTests(unittest.TestCase):
+    def test_format_python_error_location(self):
+        self.assertEqual(
+            _format_python_error_location(
+                {"line": 4, "column": 7, "source": "value / 0"}
+            ),
+            "Ошибка в строке 4, колонка 7: value / 0",
+        )
+        self.assertIsNone(_format_python_error_location({"ename": "ValueError"}))
+
     def test_repl_module_can_disable_python_tool_and_prompt(self):
         module = ReplModule()
         config = {"configurable": {"no_python_tool": True}}

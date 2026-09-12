@@ -7,9 +7,11 @@ decorated with `<task>` tags, making it appear as multiple active tasks.
 """
 
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from giga_agent.conf import reset_settings_cache
 from giga_agent.core.agent.graph_factory import (
     _build_file_prompt,
     _context_compaction_notice,
@@ -138,6 +140,16 @@ class HelperFunctionTests(unittest.TestCase):
         original_instructions = state["instructions"]
         _generate_user_info(state)
         self.assertEqual(state["instructions"], original_instructions)
+
+    def test_generate_user_info_uses_configured_language(self):
+        with patch.dict("os.environ", {"GIGA_AGENT_LANGUAGE": "en"}):
+            reset_settings_cache()
+            try:
+                user_info = _generate_user_info({"messages": []})
+            finally:
+                reset_settings_cache()
+
+        self.assertIn("Выбранный язык пользователя: en", user_info)
 
     def test_plan_mode_human_reminder_is_emitted_only_in_plan_mode(self):
         reminder = _plan_mode_human_reminder({"mode": "plan"})

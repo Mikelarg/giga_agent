@@ -81,6 +81,7 @@ class LocalPythonWorkerManager:
         cwd: Path,
         safe_execution: bool,
         policy: SandboxAccessPolicy | None,
+        source_code: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], str]:
         completed = False
         worker: _Worker | None = None
@@ -93,15 +94,15 @@ class LocalPythonWorkerManager:
                     policy=policy,
                 )
                 request_id = uuid.uuid4().hex
-                await self._write_message(
-                    worker.process,
-                    {
-                        "type": "execute",
-                        "request_id": request_id,
-                        "code": code,
-                        "envs": envs or {},
-                    },
-                )
+                execute_message: dict[str, Any] = {
+                    "type": "execute",
+                    "request_id": request_id,
+                    "code": code,
+                    "envs": envs or {},
+                }
+                if source_code is not None:
+                    execute_message["source_code"] = source_code
+                await self._write_message(worker.process, execute_message)
 
                 while True:
                     event = await self._read_message(worker.process)

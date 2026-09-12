@@ -2,6 +2,7 @@
 returns its ToolMessage inside a Command (which previously bypassed processing).
 """
 
+import json
 import types
 import unittest
 
@@ -71,6 +72,35 @@ class InlineTruncationTests(unittest.IsolatedAsyncioTestCase):
         msg = out.update["messages"][0]
         self.assertIn("42", msg.content)
         self.assertNotIn("обрезан", msg.content)
+
+    async def test_command_preserves_python_error_status_and_payload(self):
+        error_text = (
+            "Ошибка в строке 4, колонка 10: result = x / y\n"
+            "Error: ZeroDivisionError: division by zero"
+        )
+        command = Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=error_text,
+                        tool_call_id="call1",
+                        status="error",
+                        additional_kwargs={
+                            "tool_name": "python",
+                            "custom_metadata": {"source": "worker"},
+                        },
+                    )
+                ]
+            }
+        )
+
+        out = await _wrap(command)
+        msg = out.update["messages"][0]
+        payload = json.loads(msg.content)
+
+        self.assertEqual(msg.status, "error")
+        self.assertEqual(payload["data"], error_text)
+        self.assertEqual(msg.additional_kwargs["custom_metadata"], {"source": "worker"})
 
     async def test_command_preserves_planning_snapshot_and_error_status(self):
         command = Command(

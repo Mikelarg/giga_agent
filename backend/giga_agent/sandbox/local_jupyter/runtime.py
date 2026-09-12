@@ -400,6 +400,7 @@ class LocalJupyterSandbox(LocalShellMixin, JupyterSandbox):
         *,
         allow_stdin: bool = True,
         envs: dict[str, str] | None = None,
+        source_code: str | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], str]:
         code = _inject_cwd_prelude(
@@ -427,6 +428,7 @@ class LocalJupyterSandbox(LocalShellMixin, JupyterSandbox):
             code_iter = get_local_python_worker_manager().run_code(
                 kernel_id=self._kernel_id,
                 code=code,
+                source_code=source_code,
                 envs=envs,
                 cwd=self._default_workdir(),
                 safe_execution=self.safe_execution,

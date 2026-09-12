@@ -55,6 +55,104 @@ def _read_message() -> dict[str, Any]:
     return message
 
 
+def _source_context(
+    code: str,
+    source_code: str | None,
+) -> tuple[str, int] | None:
+    """Return user source and its first line in the compiled code.
+
+    ``source_code`` is optional for protocol compatibility.  When it is not
+    supplied, the worker treats the complete command as user code.  When it
+    is supplied, the last exact occurrence is used because runtime/prelude
+    code is prepended to the user code.
+    """
+    if source_code is None:
+        return code, 1
+    if not source_code:
+        return None
+    source_start = code.rfind(source_code)
+    if source_start < 0:
+        return None
+    first_line = code.count("\n", 0, source_start) + 1
+    return source_code, first_line
+
+
+def _error_location(
+    exc: BaseException,
+    *,
+    code: str,
+    source_code: str | None,
+) -> dict[str, Any]:
+    """Extract a user-facing location without changing the old error fields."""
+    context = _source_context(code, source_code)
+    if context is None:
+        return {}
+    user_source, source_first_line = context
+
+    line_in_compiled_code: int | None = None
+    column: int | None = None
+    if isinstance(exc, SyntaxError):
+        line_in_compiled_code = exc.lineno
+        column = exc.offset
+    else:
+        try:
+            frames = traceback.extract_tb(exc.__traceback__)
+            tool_frame = next(
+                (
+                    frame
+                    for frame in reversed(frames)
+                    if frame.filename == "<python-tool>"
+                ),
+                None,
+            )
+        except Exception:  # noqa: BLE001
+            tool_frame = None
+        if tool_frame is not None:
+            line_in_compiled_code = tool_frame.lineno
+            frame_column = getattr(tool_frame, "colno", None)
+            if isinstance(frame_column, int):
+                # FrameSummary.colno is zero-based; public locations are 1-based.
+                column = frame_column + 1
+
+    if not isinstance(line_in_compiled_code, int):
+        return {}
+    line = line_in_compiled_code - source_first_line + 1
+    source_lines = user_source.splitlines()
+    if line < 1 or line > len(source_lines):
+        return {}
+
+    location: dict[str, Any] = {
+        "line": line,
+        "source": source_lines[line - 1],
+    }
+    if isinstance(column, int) and column > 0:
+        location["column"] = column
+    return location
+
+
+def _error_event(
+    exc: BaseException,
+    *,
+    code: str | None = None,
+    source_code: str | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "error",
+        "ename": exc.__class__.__name__,
+        "evalue": str(exc),
+        "traceback": traceback.format_exception(exc),
+    }
+    if code is not None:
+        event.update(
+            _error_location(
+                exc,
+                code=code,
+                source_code=source_code,
+            )
+        )
+    return event
+
+
 def _worker_input(prompt: object = "") -> str:
     if not isinstance(prompt, str) or not prompt.startswith(_REPL_TOOL_INPUT_PREFIX):
         raise RuntimeError(
@@ -153,11 +251,14 @@ def _handle_execute(message: dict[str, Any], namespace: dict[str, Any]) -> None:
 
     request_id = message.get("request_id")
     code = message.get("code")
+    source_code = message.get("source_code")
     envs = message.get("envs")
     if not isinstance(request_id, str) or not request_id:
         raise RuntimeError("execute request_id must be a non-empty string")
     if not isinstance(code, str):
         raise RuntimeError("execute code must be a string")
+    if source_code is not None and not isinstance(source_code, str):
+        raise RuntimeError("execute source_code must be a string")
     if envs is not None and not isinstance(envs, dict):
         raise RuntimeError("execute envs must be an object")
 
@@ -174,14 +275,7 @@ def _handle_execute(message: dict[str, Any], namespace: dict[str, Any]) -> None:
             _execute_code(code, namespace)
             _capture_open_matplotlib_figures()
     except BaseException as exc:  # noqa: BLE001
-        _send(
-            {
-                "type": "error",
-                "ename": exc.__class__.__name__,
-                "evalue": str(exc),
-                "traceback": traceback.format_exception(exc),
-            }
-        )
+        _send(_error_event(exc, code=code, source_code=source_code))
     finally:
         _send({"type": "done"})
         _current_request_id = None
@@ -215,14 +309,7 @@ def main() -> int:
         try:
             _handle_execute(message, namespace)
         except BaseException as exc:  # noqa: BLE001
-            _send(
-                {
-                    "type": "error",
-                    "ename": exc.__class__.__name__,
-                    "evalue": str(exc),
-                    "traceback": traceback.format_exception(exc),
-                }
-            )
+            _send(_error_event(exc))
 
 
 if __name__ == "__main__":

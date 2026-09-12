@@ -42,10 +42,17 @@ class LocalPythonWorkerManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.stop_all()
         self._tmp_dir.cleanup()
 
-    def _run(self, kernel_id: str, code: str) -> AsyncGenerator[dict[str, Any], str]:
+    def _run(
+        self,
+        kernel_id: str,
+        code: str,
+        *,
+        source_code: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], str]:
         return self.manager.run_code(
             kernel_id=kernel_id,
             code=code,
+            source_code=source_code,
             envs=None,
             cwd=self.cwd,
             safe_execution=False,
@@ -106,6 +113,64 @@ class LocalPythonWorkerManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["type"], "error")
         self.assertEqual(events[0]["ename"], "RuntimeError")
         self.assertIn("Interactive input() is not supported", events[0]["evalue"])
+
+    async def test_worker_reports_runtime_error_location_and_keeps_old_fields(self):
+        source_code = "value = 1\nvalue = 0\nvalue / value"
+        events = await _collect_events(
+            self._run(
+                "kernel-error-location",
+                source_code,
+                source_code=source_code,
+            )
+        )
+
+        error = events[0]
+        self.assertEqual(error["type"], "error")
+        self.assertEqual(error["ename"], "ZeroDivisionError")
+        self.assertEqual(error["evalue"], "division by zero")
+        self.assertIsInstance(error["traceback"], list)
+        self.assertEqual(error["line"], 3)
+        self.assertEqual(error["source"], "value / value")
+
+    async def test_worker_maps_error_after_generated_prelude_to_user_line(self):
+        source_code = "value = 1\nvalue / 0"
+        generated_code = "_generated = True\n\n" + source_code
+        events = await _collect_events(
+            self._run(
+                "kernel-error-prelude",
+                generated_code,
+                source_code=source_code,
+            )
+        )
+
+        error = events[0]
+        self.assertEqual(error["line"], 2)
+        self.assertEqual(error["source"], "value / 0")
+
+    async def test_worker_reports_syntax_error_location(self):
+        source_code = "value = 1\nvalue +\n"
+        events = await _collect_events(
+            self._run(
+                "kernel-syntax-error",
+                source_code,
+                source_code=source_code,
+            )
+        )
+
+        error = events[0]
+        self.assertEqual(error["ename"], "SyntaxError")
+        self.assertEqual(error["line"], 2)
+        self.assertGreater(error["column"], 0)
+        self.assertEqual(error["source"], "value +")
+
+    async def test_worker_without_source_code_keeps_legacy_direct_protocol(self):
+        events = await _collect_events(self._run("kernel-legacy-error", "1 / 0"))
+
+        error = events[0]
+        self.assertEqual(error["ename"], "ZeroDivisionError")
+        self.assertIsInstance(error["traceback"], list)
+        self.assertEqual(error["line"], 1)
+        self.assertEqual(error["source"], "1 / 0")
 
     async def test_worker_captures_matplotlib_and_plotly_displays(self):
         matplotlib_events = await _collect_events(

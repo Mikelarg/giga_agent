@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from typer.testing import CliRunner
 
@@ -34,6 +35,7 @@ from giga_agent.cli.commands.cli_chat import (
     _render_cli_question_prompt,
     _stream_raw_tokens,
     _stop_subagent_statuses,
+    _stop_supervised_processes_once,
     _chat_loop,
 )
 
@@ -146,6 +148,80 @@ def test_raw_cli_stream_prints_tool_before_final_agent_message(capsys) -> None:
 
     output = capsys.readouterr().out
     assert output.index("[Tool: shell(command='pip list')]") < output.index("Готово")
+
+
+def test_jsonl_cli_stream_emits_structured_events_without_rich_output(capsys) -> None:
+    from langchain_core.messages import AIMessageChunk, ToolMessage
+    from rich.console import Console
+
+    async def events():
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        SimpleNamespace(
+                            tool_calls=[
+                                {
+                                    "id": "call-1",
+                                    "name": "shell",
+                                    "args": {"command": "pip list"},
+                                }
+                            ]
+                        )
+                    ]
+                }
+            },
+        )
+        yield (
+            "messages",
+            (
+                ToolMessage(
+                    content="package output",
+                    tool_call_id="call-1",
+                    name="shell",
+                ),
+                {},
+            ),
+        )
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="Готово",
+                    additional_kwargs={"reasoning_content": "Проверяю результат."},
+                ),
+                {},
+            ),
+        )
+
+    graph = SimpleNamespace(astream=lambda *_args, **_kwargs: events())
+    asyncio.run(
+        _stream_raw_tokens(
+            graph,
+            {"messages": []},
+            {},
+            Console(),
+            _ChatState(approve=True, debug=False, jsonl=True),
+        )
+    )
+
+    output = capsys.readouterr().out
+    lines = [json.loads(line) for line in output.splitlines()]
+    assert [line["type"] for line in lines] == [
+        "tool_call",
+        "assistant_message",
+        "tool_result",
+        "assistant_message",
+    ]
+    assert lines[0]["call_id"] == "call-1"
+    assert lines[2]["content"] == "package output"
+    assert lines[3]["content"] == "Готово"
+    assert lines[0]["message_id"] == lines[1]["message_id"]
+    assert lines[1]["message_id"] == lines[2]["message_id"]
+    assert lines[3]["message_id"] != lines[0]["message_id"]
+    assert lines[3]["reasoning_content"] == "Проверяю результат."
+    assert "\u001b" not in output
 
 
 def test_subagent_message_metadata_is_filtered() -> None:
@@ -605,12 +681,52 @@ def test_chat_loop_stops_worker_for_previous_kernel_on_new_chat(monkeypatch) -> 
 
 
 def test_cli_help_mentions_plan_option() -> None:
-    result = CliRunner().invoke(app, ["cli", "--help"])
+    runner = CliRunner()
+    result = runner.invoke(app, ["cli", "--help"])
 
     assert result.exit_code == 0
     assert "--plan" in result.stdout
+    assert "--disable-anti-loop" in result.stdout
     assert "--no-python-tool" in result.stdout
+    assert "--jsonl" in result.stdout
     assert "--python-executor" in result.stdout
+
+    keep_processes_result = runner.invoke(
+        app, ["cli", "--keep-background-processes", "--help"]
+    )
+    assert keep_processes_result.exit_code == 0
+
+
+def test_stop_supervised_processes_can_keep_background_processes(monkeypatch) -> None:
+    supervisor = SimpleNamespace(stop_all=Mock())
+    monkeypatch.setattr(
+        "giga_agent.cli.commands.cli_chat.get_process_supervisor",
+        lambda: supervisor,
+    )
+    stop_state: dict[str, bool] = {}
+
+    _stop_supervised_processes_once(
+        stop_state=stop_state,
+        reason="CLI shutdown",
+        keep_background_processes=True,
+    )
+
+    supervisor.stop_all.assert_not_called()
+    assert stop_state == {"done": True}
+
+
+def test_stop_supervised_processes_stops_by_default(monkeypatch) -> None:
+    supervisor = SimpleNamespace(stop_all=Mock(return_value=[]))
+    monkeypatch.setattr(
+        "giga_agent.cli.commands.cli_chat.get_process_supervisor",
+        lambda: supervisor,
+    )
+    _stop_supervised_processes_once(
+        stop_state={},
+        reason="CLI shutdown",
+    )
+
+    supervisor.stop_all.assert_called_once_with()
 
 
 def test_make_cli_thread_config_sets_thread_and_user() -> None:
@@ -634,6 +750,17 @@ def test_make_cli_thread_config_can_disable_python_tool() -> None:
     )
 
     assert config["configurable"]["no_python_tool"] is True
+
+
+def test_make_cli_thread_config_can_disable_anti_loop() -> None:
+    config = _make_cli_thread_config(
+        thread_id="thread-4",
+        checkpointer=object(),
+        user_id="user-1",
+        disable_anti_loop=True,
+    )
+
+    assert config["configurable"]["disable_anti_loop"] is True
 
 
 def test_extract_interrupt_value_reads_payload_from_state() -> None:

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     )
 
     giga_agent_prefix_api: str = Field("/agent", alias="GIGA_AGENT_PREFIX_API")
+    giga_agent_language: str = Field("ru", alias="GIGA_AGENT_LANGUAGE")
     giga_agent_base_url: str | None = Field(None, alias="GIGA_AGENT_BASE_URL")
     giga_agent_frontend_dir: str | None = Field(None, alias="GIGA_AGENT_FRONTEND_DIR")
     giga_agent_ui: bool = Field(True, alias="GIGA_AGENT_UI")
@@ -356,6 +357,9 @@ class Settings(BaseSettings):
     giga_agent_scraper_jina_base_url: str = Field(
         "https://r.jina.ai/",
         alias="GIGA_AGENT_SCRAPER_JINA_BASE_URL",
+    )
+    giga_agent_scraper: Literal["jina", "tavily"] = Field(
+        "jina", alias="GIGA_AGENT_SCRAPER"
     )
     giga_agent_scraper_total_concurrency: int = Field(
         3, alias="GIGA_AGENT_SCRAPER_TOTAL_CONCURRENCY"

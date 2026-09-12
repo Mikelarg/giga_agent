@@ -357,6 +357,22 @@ def _build_error_envelope(exc: Exception) -> dict[str, Any]:
     }
 
 
+def _format_python_error_location(chunk: dict[str, Any]) -> str | None:
+    line = chunk.get("line")
+    if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+        return None
+
+    column = chunk.get("column")
+    source = chunk.get("source")
+    position = f"Ошибка в строке {line}"
+    if isinstance(column, int) and not isinstance(column, bool) and column > 0:
+        position += f", колонка {column}"
+    if isinstance(source, str) and source:
+        source_line = source.rstrip("\r\n")
+        position += f": {source_line}"
+    return position
+
+
 async def _invoke_repl_tool_callable(
     tool_callable: Any,
     kwargs: dict[str, Any],
@@ -482,6 +498,7 @@ async def python(
         prepared_code,
         kernel_id=kernel_id,
         envs=secret_envs,
+        source_code=code,
     )
     pending_input_reply: str | None = None
     while True:
@@ -529,7 +546,9 @@ async def python(
             # Очищаем ANSI escape-коды из traceback
             ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
             clean_tb = "\n".join(ansi_escape.sub("", line) for line in traceback_lines)
-            outputs.append(f"Error: {ename}: {evalue}\n{clean_tb}")
+            location = _format_python_error_location(chunk)
+            error_text = f"Error: {ename}: {evalue}\n{clean_tb}"
+            outputs.append(f"{location}\n{error_text}" if location else error_text)
         elif chunk_type == "display_data":
             data = chunk.get("data", {})
             if isinstance(data, dict):

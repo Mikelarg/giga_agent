@@ -49,6 +49,26 @@ class ConfSettingsTests(unittest.TestCase):
             settings = get_settings()
             self.assertEqual(settings.giga_agent_log_level, "INFO")
 
+    def test_uses_russian_language_by_default(self):
+        with self._patched_env({}, clear=True):
+            settings = get_settings()
+            self.assertEqual(settings.giga_agent_language, "ru")
+
+    def test_reads_language(self):
+        with self._patched_env({"GIGA_AGENT_LANGUAGE": "en"}, clear=True):
+            settings = get_settings()
+            self.assertEqual(settings.giga_agent_language, "en")
+
+    def test_scraper_uses_jina_by_default(self):
+        with self._patched_env({}, clear=True):
+            settings = get_settings()
+            self.assertEqual(settings.giga_agent_scraper, "jina")
+
+    def test_reads_scraper_mode(self):
+        with self._patched_env({"GIGA_AGENT_SCRAPER": "tavily"}, clear=True):
+            settings = get_settings()
+            self.assertEqual(settings.giga_agent_scraper, "tavily")
+
     def test_gigachat_from_env_disabled_by_default(self):
         with self._patched_env({}, clear=True):
             settings = get_settings()

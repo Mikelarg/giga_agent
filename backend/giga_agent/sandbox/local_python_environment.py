@@ -40,7 +40,7 @@ class LocalPythonEnvironment:
         if venv_dir is not None:
             env["VIRTUAL_ENV"] = str(venv_dir)
         env["PYTHONNOUSERSITE"] = "1"
-        env["PIP_REQUIRE_VIRTUALENV"] = "1"
+        env["PIP_REQUIRE_VIRTUALENV"] = ""
         if extra_envs:
             env.update({str(key): str(value) for key, value in extra_envs.items()})
         return env

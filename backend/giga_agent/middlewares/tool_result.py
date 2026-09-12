@@ -232,6 +232,9 @@ def _build_inline_output_message(
     tool_attachments: list[dict[str, Any]],
     message: str,
     max_size: int,
+    *,
+    preserved_additional_kwargs: dict[str, Any] | None = None,
+    status: str = "success",
 ) -> ToolMessage:
     if isinstance(normalized_result, dict) and isinstance(
         normalized_result.get("output"), str
@@ -251,13 +254,18 @@ def _build_inline_output_message(
     if message:
         payload["message"] = message
 
+    additional_kwargs: dict[str, Any] = dict(preserved_additional_kwargs or {})
+    additional_kwargs.update(
+        {
+            "tool_attachments": tool_attachments,
+            "tool_name": action.get("name"),
+        }
+    )
     return ToolMessage(
         tool_call_id=action.get("id"),
         content=_safe_json_dumps(payload),
-        additional_kwargs={
-            "tool_attachments": tool_attachments,
-            "tool_name": action.get("name"),
-        },
+        status=status,
+        additional_kwargs=additional_kwargs,
     )
 
 
@@ -324,6 +332,8 @@ async def process_tool_result(
             tool_attachments,
             message,
             _get_max_tool_size(),
+            preserved_additional_kwargs=preserved_additional_kwargs,
+            status=status,
         )
 
     result_path = await _save_tool_result(
