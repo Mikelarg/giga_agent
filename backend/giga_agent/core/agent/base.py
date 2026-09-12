@@ -412,17 +412,23 @@ class BaseAgent(BaseModel):
             user_fingerprint = id(user)
 
         is_channel = False
+        is_telegram_channel = False
         if isinstance(config, dict):
             metadata = await get_thread_metadata(
                 config, get_thread_id_from_config(config)
             )
             is_channel = bool(metadata.get("is_channel"))
+            is_telegram_channel = metadata.get("channel") == "telegram"
         no_python_tool = bool(
             ((config or {}).get("configurable") or {}).get("no_python_tool")
         )
         cache_key = (user_id, user_fingerprint, is_channel, no_python_tool)
         cached = None if execution is not None else self._tools_cache.get(cache_key)
         if cached is not None:
+            if is_telegram_channel:
+                from giga_agent.channels.telegram.chat_history import get_history_tools
+
+                return [*cached, *await get_history_tools(user, config)]
             return cached
 
         all_tools: list[BaseTool] = [] if execution is not None else list(self.tools)
@@ -449,6 +455,12 @@ class BaseAgent(BaseModel):
 
         if execution is None:
             self._tools_cache[cache_key] = all_tools
+        # Channel history is bound to the current LangGraph thread, so it must
+        # never enter the shared tools cache above.
+        if is_telegram_channel:
+            from giga_agent.channels.telegram.chat_history import get_history_tools
+
+            all_tools = [*all_tools, *await get_history_tools(user, config)]
         return all_tools
 
     async def run_startup_hooks(self):

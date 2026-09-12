@@ -347,6 +347,26 @@ class SubagentThreadResultTests(unittest.TestCase):
         self.assertEqual({tool.name for tool in parent_tools}, {"subtask", "thread_result"})
         self.assertEqual(child_tools, [])
 
+    def test_module_hides_tools_in_channel_run(self):
+        module = SubagentsModule()
+        user = types.SimpleNamespace()
+
+        with patch.object(module, "_is_channel_run", new=AsyncMock(return_value=True)):
+            tools = asyncio.run(module._get_tools(user, object(), config={}))
+
+        self.assertEqual(tools, [])
+
+    def test_module_hides_instructions_in_channel_run(self):
+        module = SubagentsModule()
+        user = types.SimpleNamespace()
+
+        with patch.object(module, "_is_channel_run", new=AsyncMock(return_value=True)):
+            instructions = asyncio.run(
+                module.get_instructions(user, object(), config={})
+            )
+
+        self.assertIsNone(instructions)
+
     def test_module_hides_parent_tools_when_no_ready_subagents(self):
         module = SubagentsModule()
         user = types.SimpleNamespace()

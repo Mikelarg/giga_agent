@@ -127,7 +127,7 @@ class TelegramChannel(Channel):
         """
         from giga_agent.channels.telegram.services.media import TelegramMediaService
 
-        tg_bot = create_telegram_bot(self.bot_token)
+        tg_bot = create_telegram_bot(self.bot_token, bot_row=bot)
         try:
             media = TelegramMediaService(bot=tg_bot, bot_row=bot)
             return await media.send_parts_to_chat(

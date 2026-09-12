@@ -11,6 +11,10 @@ from giga_agent.core.module import BaseModule
 from giga_agent.models.users import UserShort
 from giga_agent.modules.subagents.tools import subtask, thread_result
 from giga_agent.subagents.execution import configured_subagent_ref
+from giga_agent.utils.thread_metadata import (
+    get_thread_id_from_config,
+    get_thread_metadata,
+)
 
 
 SUBAGENTS_INSTRUCTIONS = """## Суб-агенты
@@ -123,6 +127,16 @@ class SubagentsModule(BaseModule):
     description: str = "Делегирование изолированных задач специализированным агентам"
     icon: str = "Bot"
 
+    @staticmethod
+    async def _is_channel_run(config: RunnableConfig | None) -> bool:
+        """Return whether this run belongs to a messenger-channel thread."""
+        if not isinstance(config, dict):
+            return False
+        metadata = await get_thread_metadata(
+            config, get_thread_id_from_config(config)
+        )
+        return bool(metadata.get("is_channel"))
+
     def get_agents(self, **kwargs: Any) -> list[str]:
         _ = kwargs
         return [
@@ -138,7 +152,7 @@ class SubagentsModule(BaseModule):
         **kwargs: Any,
     ):
         _ = kwargs
-        if configured_subagent_ref(config):
+        if configured_subagent_ref(config) or await self._is_channel_run(config):
             return []
         if user is None:
             return [subtask, thread_result]
@@ -187,7 +201,11 @@ class SubagentsModule(BaseModule):
         **kwargs: Any,
     ) -> str | None:
         _ = state, kwargs
-        if user is None or configured_subagent_ref(config):
+        if (
+            user is None
+            or configured_subagent_ref(config)
+            or await self._is_channel_run(config)
+        ):
             return None
         ready = await self._ready_definitions(user, agent, config=config)
         if not ready:
