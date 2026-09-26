@@ -11,7 +11,10 @@ from giga_agent.channels.telegram.constants import (
     GROUP_CHAT_TYPES,
     SUPPORTED_CHAT_TYPES,
 )
-from giga_agent.channels.telegram.message_context import get_message_text
+from giga_agent.channels.telegram.message_context import (
+    build_reply_kwargs,
+    get_message_text,
+)
 from giga_agent.channels.telegram.runtime import (
     get_bot_username,
     get_contact_external_user_id,
@@ -57,6 +60,7 @@ class TelegramAccessService:
         message: tg_types.Message,
         *,
         callback: tg_types.CallbackQuery | None = None,
+        reply_to_message_id: int | None = None,
     ) -> bool:
         chat_type = getattr(message.chat, "type", None)
         if chat_type in SUPPORTED_CHAT_TYPES:
@@ -66,7 +70,8 @@ class TelegramAccessService:
             await callback.answer("Этот тип чата не поддерживается", show_alert=True)
         else:
             await message.answer(
-                "Этот тип чата пока не поддерживается. Используйте личный чат, группу или супергруппу."
+                "Этот тип чата пока не поддерживается. Используйте личный чат, группу или супергруппу.",
+                **build_reply_kwargs(reply_to_message_id),
             )
         return False
 

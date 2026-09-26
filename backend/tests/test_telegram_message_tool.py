@@ -895,6 +895,55 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_input["messages"][0]["role"], "human")
         app.bot.send_rich_message.assert_awaited()
 
+    async def test_stopped_run_with_empty_result_does_not_send_error_or_reset_thread(
+        self,
+    ):
+        app = _bot_app()
+        message = _message("Долгая задача")
+        repo = types.SimpleNamespace(
+            get_contact=AsyncMock(return_value=types.SimpleNamespace(is_approved=True))
+        )
+        client = types.SimpleNamespace(
+            runs=types.SimpleNamespace(wait=AsyncMock(return_value={})),
+            aclose=AsyncMock(),
+        )
+
+        @asynccontextmanager
+        async def _session_context():
+            yield object()
+
+        app.access_service.register_contact = AsyncMock()
+        app.thread_service.get_or_create_thread = AsyncMock(return_value="thread-1")
+        app.thread_service.reset_thread = AsyncMock()
+        app.thread_service.create_client = lambda token: client
+        app.thread_service.create_token = lambda: "token"
+        app.thread_service.load_collections_payload = AsyncMock(return_value=[])
+        app.message_tool_runtime.get_pending_message_tool_calls = AsyncMock(
+            return_value=[]
+        )
+        app.message_tool_runtime.has_active_run = AsyncMock(return_value=False)
+        app.message_tool_runtime.continue_run_until_ready = AsyncMock(return_value={})
+        app.media_service.collect_incoming_files = AsyncMock(return_value=[])
+        app.media_service.send_run_result = AsyncMock()
+        app.status_service.was_stopped_since = AsyncMock(return_value=True)
+
+        with (
+            patch(
+                "giga_agent.channels.telegram.handlers.messages.get_session_factory",
+                AsyncMock(return_value=lambda: _session_context()),
+            ),
+            patch(
+                "giga_agent.channels.telegram.handlers.messages.ChannelBotRepository",
+                return_value=repo,
+            ),
+        ):
+            await app.handle_message(message)
+
+        message.answer.assert_not_awaited()
+        app.thread_service.reset_thread.assert_not_awaited()
+        app.media_service.send_run_result.assert_not_awaited()
+        client.aclose.assert_awaited_once()
+
     async def test_handle_message_includes_reply_context_and_sender_metadata(self):
         app = _bot_app()
         reply_message = _message(

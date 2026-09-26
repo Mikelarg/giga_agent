@@ -31,6 +31,7 @@ def _app():
 def _message(text="/status"):
     return types.SimpleNamespace(
         text=text,
+        message_id=77,
         chat=types.SimpleNamespace(id=42, type="private"),
         from_user=types.SimpleNamespace(id=123),
         answer=AsyncMock(),
@@ -222,6 +223,10 @@ class TelegramStatusTests(unittest.IsolatedAsyncioTestCase):
 
         app.thread_service.stop_thread_runs.assert_awaited_once_with(client, "thread-1")
         self.assertIn("остановлена", message.answer.await_args.args[0])
+        self.assertEqual(
+            message.answer.await_args.kwargs["reply_parameters"].message_id,
+            message.message_id,
+        )
         client.aclose.assert_awaited_once()
 
     async def test_stop_does_not_cancel_waiting_message_tool(self):
@@ -256,6 +261,31 @@ class TelegramStatusTests(unittest.IsolatedAsyncioTestCase):
 
         app.status_service.get_status.assert_not_awaited()
         self.assertIn("не выполняет", message.answer.await_args.args[0])
+        self.assertEqual(
+            message.answer.await_args.kwargs["reply_parameters"].message_id,
+            message.message_id,
+        )
+
+    async def test_status_summary_replies_to_command(self):
+        app = _app()
+        message = _message()
+        client = types.SimpleNamespace(aclose=AsyncMock())
+        app.message_handlers._command_thread_id = AsyncMock(return_value="thread-1")
+        app.thread_service.create_client = lambda _: client
+        app.thread_service.create_token = lambda: "token"
+        app.status_service.active_runs = AsyncMock(return_value=[{"run_id": "run-1"}])
+        app.message_tool_runtime.get_pending_message_tool_calls = AsyncMock(
+            return_value=[]
+        )
+        app.status_service.get_status = AsyncMock(return_value="Агент ищет данные.")
+
+        await app.message_handlers.handle_status(message)
+
+        self.assertEqual(message.answer.await_args.args[0], "Агент ищет данные.")
+        self.assertEqual(
+            message.answer.await_args.kwargs["reply_parameters"].message_id,
+            message.message_id,
+        )
 
     async def test_stop_marker_applies_only_to_older_requests(self):
         app = _app()

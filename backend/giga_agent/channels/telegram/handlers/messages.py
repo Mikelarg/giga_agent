@@ -71,9 +71,10 @@ class TelegramMessageHandlers:
             repo = ChannelBotRepository(session)
             contact = await repo.get_contact(self.bot_row.id, str(message.chat.id))
             if contact is None or not contact.is_approved:
-                await message.answer(
+                await self._answer_command(
+                    message,
                     "⏳ Ваш контакт ожидает подтверждения. "
-                    "Владелец бота должен одобрить вас в настройках."
+                    "Владелец бота должен одобрить вас в настройках.",
                 )
                 return None
             thread = await repo.get_thread(
@@ -83,72 +84,93 @@ class TelegramMessageHandlers:
             )
             return thread.langgraph_thread_id if thread else ""
 
+    async def _answer_command(self, message: tg_types.Message, text: str) -> None:
+        await message.answer(text, **build_reply_kwargs(message.message_id))
+
     async def handle_status(self, message: tg_types.Message) -> None:
-        if not await self.access_service.ensure_supported_chat(message):
+        if not await self.access_service.ensure_supported_chat(
+            message, reply_to_message_id=message.message_id
+        ):
             return
         thread_id = await self._command_thread_id(message)
         if thread_id is None:
             return
         if not thread_id:
-            await message.answer("Сейчас агент не выполняет задачу.")
+            await self._answer_command(message, "Сейчас агент не выполняет задачу.")
             return
         client = self.thread_service.create_client(self.thread_service.create_token())
         try:
             runs = await self.status_service.active_runs(client, thread_id)
             if not runs:
-                await message.answer("Сейчас агент не выполняет задачу.")
+                await self._answer_command(message, "Сейчас агент не выполняет задачу.")
                 return
             if await self.message_tool_runtime.get_pending_message_tool_calls(
                 client, thread_id
             ):
-                await message.answer("Сейчас агент ожидает вашего ответа.")
+                await self._answer_command(
+                    message, "Сейчас агент ожидает вашего ответа."
+                )
                 return
             run_id = str(runs[0].get("run_id") or "")
             if not run_id:
-                await message.answer("⏳ Агент работает над запросом.")
+                await self._answer_command(message, "⏳ Агент работает над запросом.")
                 return
-            await message.answer(
-                await self.status_service.get_status(client, thread_id, run_id)
+            await self._answer_command(
+                message, await self.status_service.get_status(client, thread_id, run_id)
             )
         except Exception:
             logger.warning("Failed to fetch Telegram status", exc_info=True)
-            await message.answer("⚠️ Не удалось получить статус. Попробуйте позже.")
+            await self._answer_command(
+                message, "⚠️ Не удалось получить статус. Попробуйте позже."
+            )
         finally:
             await client.aclose()
 
     async def handle_stop(self, message: tg_types.Message) -> None:
-        if not await self.access_service.ensure_supported_chat(message):
+        if not await self.access_service.ensure_supported_chat(
+            message, reply_to_message_id=message.message_id
+        ):
             return
         thread_id = await self._command_thread_id(message)
         if thread_id is None:
             return
         if not thread_id:
-            await message.answer("Сейчас нет активного запуска для остановки.")
+            await self._answer_command(
+                message, "Сейчас нет активного запуска для остановки."
+            )
             return
         client = self.thread_service.create_client(self.thread_service.create_token())
         try:
             runs = await self.status_service.active_runs(client, thread_id)
             if not runs:
-                await message.answer("Сейчас нет активного запуска для остановки.")
+                await self._answer_command(
+                    message, "Сейчас нет активного запуска для остановки."
+                )
                 return
             if await self.message_tool_runtime.get_pending_message_tool_calls(
                 client, thread_id
             ):
-                await message.answer("Сейчас нет активного запуска для остановки.")
+                await self._answer_command(
+                    message, "Сейчас нет активного запуска для остановки."
+                )
                 return
             await self.status_service.mark_stopped(thread_id)
             count = await self.thread_service.stop_thread_runs(client, thread_id)
             if count:
-                await message.answer(
-                    "🛑 Работа остановлена. Можете написать новую задачу."
+                await self._answer_command(
+                    message, "🛑 Работа остановлена. Можете написать новую задачу."
                 )
             else:
                 await self.status_service.clear_stopped(thread_id)
-                await message.answer("Сейчас нет активного запуска для остановки.")
+                await self._answer_command(
+                    message, "Сейчас нет активного запуска для остановки."
+                )
         except Exception:
             await self.status_service.clear_stopped(thread_id)
             logger.warning("Failed to stop Telegram run", exc_info=True)
-            await message.answer("⚠️ Не удалось остановить работу. Попробуйте ещё раз.")
+            await self._answer_command(
+                message, "⚠️ Не удалось остановить работу. Попробуйте ещё раз."
+            )
         finally:
             await client.aclose()
 
@@ -379,6 +401,13 @@ class TelegramMessageHandlers:
                 if result is None:
                     return
 
+            # A cancelled run can resolve with an empty result. Check the stop
+            # marker before treating that result as a broken thread.
+            if await self.status_service.was_stopped_since(
+                thread_id, request_start_epoch
+            ):
+                return
+
             if not isinstance(result, dict) or not result.get("messages"):
                 logger.warning(
                     "Empty result for chat %s: %s",
@@ -396,11 +425,6 @@ class TelegramMessageHandlers:
                     "⚠️ Агент не вернул ответ. Попробуйте ещё раз.",
                     **reply_kwargs,
                 )
-                return
-
-            if await self.status_service.was_stopped_since(
-                thread_id, request_start_epoch
-            ):
                 return
 
             await self.media_service.send_run_result(
