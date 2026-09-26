@@ -54,6 +54,31 @@ const SIZE = 24;
 const STROKE = 2.5;
 const RADIUS = (SIZE - STROKE) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function resolveModelConfig(
+  modelId: string | null,
+  modelsConfig: ModelsConfig | null,
+): ModelConfig | null {
+  if (!modelId || !modelsConfig) return null;
+
+  const models = modelsConfig.models;
+  const withoutVariant = modelId.replace(/:[^/]+$/, "");
+  const withoutOpenRouterPrefix = withoutVariant.replace(/^openrouter\//, "");
+  const exact =
+    models[modelId] ??
+    models[withoutVariant] ??
+    models[withoutOpenRouterPrefix];
+  if (exact) return exact;
+
+  // Some connectors store the OpenRouter provider alongside the model slug,
+  // while others store only the slug.
+  const slug = withoutOpenRouterPrefix.split("/").at(-1);
+  if (!slug) return null;
+  return (
+    Object.entries(models).find(([key]) => key.endsWith(`/${slug}`))?.[1] ?? null
+  );
+}
 
 let modelsConfigCache: ModelsConfig | null = null;
 let llmsCache: LLMResponse[] | null = null;
@@ -95,10 +120,20 @@ const TokenUsageIndicator: React.FC<{ messages: Message[] }> = ({
     return llm?.model_id ?? null;
   }, [user?.llm_id, llms]);
 
+  const currentLlm = useMemo(
+    () => llms?.find((llm) => llm.id === user?.llm_id) ?? null,
+    [user?.llm_id, llms],
+  );
+
   const modelConfig = useMemo(() => {
-    if (!currentModelId || !modelsConfig) return null;
-    return modelsConfig.models[currentModelId] ?? null;
-  }, [currentModelId, modelsConfig]);
+    const configured = resolveModelConfig(currentModelId, modelsConfig);
+    if (configured) return configured;
+
+    // Keep the usage ring useful for custom or newly released models too.
+    return {
+      context_window: currentLlm?.context_window ?? DEFAULT_CONTEXT_WINDOW,
+    };
+  }, [currentModelId, currentLlm?.context_window, modelsConfig]);
 
   const lastKnownRef = useRef<{
     contextUsed: number;
