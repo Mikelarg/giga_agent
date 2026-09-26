@@ -9,7 +9,10 @@ from typing import Any
 
 from aiogram import types as tg_types
 
-from giga_agent.channels.telegram.constants import GROUP_CHAT_TYPES
+from giga_agent.channels.telegram.constants import (
+    GROUP_CHAT_TYPES,
+    RUN_WAIT_TIMEOUT_SECONDS,
+)
 from giga_agent.channels.telegram.message_context import (
     build_message_context,
     build_reply_kwargs,
@@ -230,7 +233,7 @@ class TelegramMessageHandlers:
                     external_user_id,
                 )
 
-            run_timeout = 600
+            run_timeout = RUN_WAIT_TIMEOUT_SECONDS
             pending_message_tools = (
                 await self.message_tool_runtime.get_pending_message_tool_calls(
                     client,

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from aiogram import types as tg_types
 
+from giga_agent.channels.telegram.constants import RUN_WAIT_TIMEOUT_SECONDS
 from giga_agent.channels.telegram.message_tool import (
     parse_telegram_message_tool_payload,
 )
@@ -106,7 +107,7 @@ class TelegramCallbackHandlers:
                 response_prompt=prompt,
                 response_text=response_text,
                 file_data=[],
-                run_timeout=90,
+                run_timeout=RUN_WAIT_TIMEOUT_SECONDS,
                 selected_button=selected_button,
             )
             result = await self.message_tool_runtime.continue_run_until_ready(
@@ -115,7 +116,7 @@ class TelegramCallbackHandlers:
                 thread_id=thread_id,
                 token=token,
                 result=result,
-                run_timeout=90,
+                run_timeout=RUN_WAIT_TIMEOUT_SECONDS,
             )
             if isinstance(result, dict) and result.get("messages"):
                 await self.media_service.send_run_result(
