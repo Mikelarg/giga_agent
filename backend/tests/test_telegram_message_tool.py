@@ -758,6 +758,76 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["response_text"], "confirm")
         self.assertEqual(kwargs["selected_button"], "Да")
 
+    async def test_group_callback_uses_clicking_user_thread(self):
+        app = _bot_app()
+        message = _message(
+            "",
+            chat_id=-1001234567890,
+            chat_type="supergroup",
+            from_user_id=9999,  # The button message was sent by the bot.
+        )
+        callback = types.SimpleNamespace(
+            data="ga_msg:0",
+            message=message,
+            from_user=types.SimpleNamespace(id=5001),
+            answer=AsyncMock(),
+        )
+        repo = types.SimpleNamespace(
+            get_contact=AsyncMock(return_value=types.SimpleNamespace(is_approved=True))
+        )
+        client = types.SimpleNamespace(aclose=AsyncMock())
+
+        @asynccontextmanager
+        async def _session_context():
+            yield object()
+
+        app.access_service.register_contact = AsyncMock()
+        app.thread_service.create_token = lambda: "token"
+        app.thread_service.create_client = lambda token: client
+        app.thread_service.get_or_create_thread = AsyncMock(return_value="thread-1")
+        app.message_tool_runtime.get_pending_message_tool_calls = AsyncMock(
+            return_value=[
+                {
+                    "id": "call-1",
+                    "name": TELEGRAM_MESSAGE_TOOL_NAME,
+                    "args": {
+                        "content": "Выбери вариант",
+                        "buttons": [
+                            {"text": "Да", "kind": "callback", "value": "confirm"}
+                        ],
+                    },
+                }
+            ]
+        )
+        app.message_tool_runtime.resume_message_tool_calls = AsyncMock(
+            return_value={"messages": []}
+        )
+        app.message_tool_runtime.continue_run_until_ready = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "giga_agent.channels.telegram.handlers.callbacks.get_session_factory",
+                AsyncMock(return_value=lambda: _session_context()),
+            ),
+            patch(
+                "giga_agent.channels.telegram.handlers.callbacks.ChannelBotRepository",
+                return_value=repo,
+            ),
+        ):
+            await app.handle_callback_query(callback)
+
+        app.thread_service.get_or_create_thread.assert_awaited_once_with(
+            client, repo, message.chat.id, "5001"
+        )
+        callback.answer.assert_awaited_once_with()
+        app.message_tool_runtime.resume_message_tool_calls.assert_awaited_once()
+        self.assertEqual(
+            app.message_tool_runtime.resume_message_tool_calls.await_args.kwargs[
+                "response_text"
+            ],
+            "confirm",
+        )
+
     async def test_register_contact_uses_group_chat_metadata(self):
         app = _bot_app()
         message = _message(

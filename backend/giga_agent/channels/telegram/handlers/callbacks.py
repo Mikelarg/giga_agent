@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 
 from aiogram import types as tg_types
 
-from giga_agent.channels.telegram.constants import RUN_WAIT_TIMEOUT_SECONDS
+from giga_agent.channels.telegram.constants import (
+    GROUP_CHAT_TYPES,
+    RUN_WAIT_TIMEOUT_SECONDS,
+)
 from giga_agent.channels.telegram.message_tool import (
     parse_telegram_message_tool_payload,
 )
@@ -68,7 +71,11 @@ class TelegramCallbackHandlers:
 
             token = self.thread_service.create_token()
             client = self.thread_service.create_client(token)
-            external_user_id = self.thread_service.resolve_external_user_id(message)
+            external_user_id = (
+                str(callback.from_user.id)
+                if message.chat.type in GROUP_CHAT_TYPES
+                else None
+            )
 
             async with session_factory() as session:
                 repo = ChannelBotRepository(session)
