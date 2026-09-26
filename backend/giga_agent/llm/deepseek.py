@@ -13,6 +13,13 @@ from giga_agent.llm.base import AvailableModel, BaseLLMRuntime, ModelFetchError
 from giga_agent.llm.registry import LLMRegistry
 
 
+_VISION_MODELS = frozenset({
+    "deepseek-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+})
+
+
 class _ChatDeepSeekWithReplay(ChatDeepSeek):
     """ChatDeepSeek that replays reasoning_content in follow-up requests.
 
@@ -112,4 +119,4 @@ class DeepSeekRuntime(BaseLLMRuntime):
         )
 
     def can_analyze_images(self) -> bool:
-        return False
+        return self.model_id in _VISION_MODELS

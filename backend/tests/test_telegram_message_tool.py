@@ -352,8 +352,15 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
     ):
         app = _bot_app()
         reply_message = _message(
-            "Смотри сюда ![ref](attachment:/bucket/reply/ref.png)",
+            "",
             message_id=76,
+        )
+        reply_message.rich_message = types.SimpleNamespace(
+            blocks=[
+                types.SimpleNamespace(
+                    text="Смотри сюда ![ref](attachment:/bucket/reply/ref.png)"
+                )
+            ]
         )
         message = _message(
             "Используй ![doc](attachment:/bucket/current/doc.pdf)",
@@ -419,7 +426,10 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
             payload["message_context"]["attachments"],
             ["/bucket/current/uploaded.jpg"],
         )
-        self.assertEqual(payload["reply"]["text"], reply_message.text)
+        self.assertEqual(
+            payload["reply"]["text"],
+            "Смотри сюда ![ref](attachment:/bucket/reply/ref.png)",
+        )
         self.assertEqual(
             payload["reply"]["attachments"],
             ["/bucket/reply/uploaded.pdf"],
@@ -580,7 +590,7 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(private_scope, BotCommandScopeAllPrivateChats)
         self.assertEqual(
             [command.command for command in private_commands],
-            ["start", "new", "message"],
+            ["start", "new", "message", "status", "stop"],
         )
 
         group_call = app.bot.set_my_commands.await_args_list[1]
@@ -589,7 +599,7 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(group_scope, BotCommandScopeAllGroupChats)
         self.assertEqual(
             [command.command for command in group_commands],
-            ["new", "message"],
+            ["new", "message", "status", "stop"],
         )
 
     async def test_handle_message_command_requires_text_or_attachment(self):
@@ -660,6 +670,23 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
             message_id=92,
             reply_to_message=reply_message,
         )
+        app.message_handlers.handle_message = AsyncMock()
+
+        await app.handle_message_command(command_message)
+
+        app.message_handlers.handle_message.assert_awaited_once_with(
+            command_message,
+            force_process=True,
+            text_override="",
+        )
+
+    async def test_handle_message_command_allows_rich_reply_content(self):
+        app = _bot_app()
+        reply_message = _message("", message_id=91)
+        reply_message.rich_message = types.SimpleNamespace(
+            blocks=[types.SimpleNamespace(text="Rich reply")]
+        )
+        command_message = _message("/message", reply_to_message=reply_message)
         app.message_handlers.handle_message = AsyncMock()
 
         await app.handle_message_command(command_message)
@@ -871,12 +898,18 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_message_includes_reply_context_and_sender_metadata(self):
         app = _bot_app()
         reply_message = _message(
-            "Исходное сообщение",
+            "",
             message_id=76,
             from_user_id=2001,
             from_username="alice",
             from_first_name="Alice",
             from_last_name="A",
+        )
+        reply_message.rich_message = types.SimpleNamespace(
+            blocks=[
+                types.SimpleNamespace(text="Исходное сообщение"),
+                types.SimpleNamespace(text="Вторая строка"),
+            ]
         )
         message = _message(
             "Ответ с уточнением",
@@ -956,6 +989,7 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ник: @alice", human_message["content"])
         self.assertIn("Имя: Alice A", human_message["content"])
         self.assertIn("Исходное сообщение", human_message["content"])
+        self.assertIn("Вторая строка", human_message["content"])
         self.assertIn("Входящее сообщение", human_message["content"])
         self.assertIn("Ник: @bob", human_message["content"])
         self.assertIn("Имя: Bob B", human_message["content"])
@@ -1021,7 +1055,8 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
 
         message.answer.assert_awaited_once_with(
             "⏳ Бот ещё обрабатывает предыдущее сообщение. "
-            "Дождитесь завершения работы и попробуйте снова."
+            "Напишите /status, чтобы узнать, что он делает, "
+            "или /stop, чтобы остановить. Дождитесь завершения и повторите запрос."
         )
         client.runs.wait.assert_not_awaited()
         message.chat.do.assert_not_awaited()
@@ -1067,7 +1102,12 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
 
         message.answer.assert_awaited_once_with(
             "⏳ Ваш контакт ожидает подтверждения. "
-            "Владелец бота должен одобрить вас в настройках."
+            "Владелец бота должен одобрить вас в настройках.",
+            reply_parameters=unittest.mock.ANY,
+        )
+        self.assertEqual(
+            message.answer.await_args.kwargs["reply_parameters"].message_id,
+            message.message_id,
         )
         app.thread_service.get_or_create_thread.assert_not_awaited()
         client.runs.wait.assert_not_awaited()
@@ -1096,6 +1136,7 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         )
         second_message = _message(
             "@test_bot Второй участник",
+            message_id=78,
             chat_id=group_chat_id,
             chat_type="supergroup",
             chat_title="GigaAgent QA",
@@ -1182,6 +1223,21 @@ class TelegramMessageToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.runs.wait.await_count, 2)
         self.assertEqual(app.bot.send_rich_message.await_count, 2)
+        for call, source in zip(
+            app.bot.send_rich_message.await_args_list,
+            (first_message, second_message),
+            strict=True,
+        ):
+            self.assertEqual(
+                call.kwargs["reply_parameters"].message_id,
+                source.message_id,
+            )
+        for call, source in zip(
+            app.message_tool_runtime.continue_run_until_ready.await_args_list,
+            (first_message, second_message),
+            strict=True,
+        ):
+            self.assertEqual(call.kwargs["reply_to_message_id"], source.message_id)
 
     async def test_handle_message_ignores_group_message_without_mention(self):
         app = _bot_app()

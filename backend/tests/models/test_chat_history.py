@@ -33,6 +33,7 @@ from giga_agent.models.channel import (
     ChatMessage,
 )
 from giga_agent.models.users import User
+from giga_agent.models.scheduled_task import ScheduledTaskRepository
 
 
 class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
@@ -425,6 +426,161 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {tool.name for tool in group_tools}, {"get_messages", "find_messages"}
         )
+
+    async def test_scheduled_history_uses_only_its_single_approved_group(self) -> None:
+        await self._add(1, "Итоги группы")
+        other_contact = ChannelContact(
+            bot_id=self.bot.id,
+            external_chat_id="-1002",
+            chat_type="group",
+            is_approved=True,
+        )
+        async with self.session_factory() as session:
+            session.add(other_contact)
+            await session.commit()
+            await session.refresh(other_contact)
+            await ChatHistoryRepository(session).upsert(
+                contact_id=other_contact.id,
+                message_id=2,
+                message="Чужие итоги",
+                metadata={},
+                created_at=datetime.now(timezone.utc),
+                update_existing=False,
+            )
+            await session.commit()
+            task = await ScheduledTaskRepository(session).create(
+                owner_id=self.owner.id,
+                prompt="Сделай сводку",
+                targets=[
+                    {
+                        "bot_id": str(self.bot.id),
+                        "external_chat_id": self.contact.external_chat_id,
+                        "external_user_id": None,
+                    }
+                ],
+            )
+
+        metadata = {
+            "is_scheduled": True,
+            "task_id": str(task.id),
+            "history_target": {
+                "bot_id": str(self.bot.id),
+                "external_chat_id": self.contact.external_chat_id,
+            },
+        }
+        config = {"metadata": {"thread_id": "scheduled-history-thread"}}
+        runtime = types.SimpleNamespace(config=config)
+        user = types.SimpleNamespace(id=self.owner.id)
+        with (
+            patch(
+                "giga_agent.channels.telegram.chat_history.get_session_factory",
+                new=AsyncMock(return_value=self.session_factory),
+            ),
+            patch(
+                "giga_agent.channels.telegram.chat_history.get_thread_metadata",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "giga_agent.core.agent.base.get_thread_metadata",
+                new=AsyncMock(return_value=metadata),
+            ),
+        ):
+            tools = await get_history_tools(user, config)
+            self.assertEqual(
+                {item.name for item in tools}, {"get_messages", "find_messages"}
+            )
+            agent_tools = await BaseAgent(modules=(), tools=[]).get_tools(
+                user, config=config
+            )
+            self.assertEqual(
+                {item.name for item in agent_tools},
+                {"get_messages", "find_messages"},
+            )
+            messages = await tools[0].coroutine(runtime=runtime)
+            found = await tools[1].coroutine(query="Итоги", runtime=runtime)
+            self.assertEqual([row["message_id"] for row in messages["messages"]], [1])
+            self.assertEqual([row["message_id"] for row in found["messages"]], [1])
+
+            # The scheduled thread cannot redirect its history access.
+            metadata["history_target"]["external_chat_id"] = "-1002"
+            self.assertEqual(await get_history_tools(user, config), [])
+            with self.assertRaisesRegex(ValueError, "История этой группы"):
+                await tools[0].coroutine(runtime=runtime)
+
+            metadata["history_target"]["external_chat_id"] = "-1001"
+            async with self.session_factory() as session:
+                contact = await session.get(ChannelContact, self.contact.id)
+                contact.is_approved = False
+                await session.commit()
+            self.assertEqual(await get_history_tools(user, config), [])
+            with self.assertRaisesRegex(ValueError, "История этой группы"):
+                await tools[1].coroutine(query="Итоги", runtime=runtime)
+
+    async def test_scheduled_history_requires_exactly_one_group(self) -> None:
+        user = types.SimpleNamespace(id=self.owner.id)
+        config = {"metadata": {"thread_id": "scheduled-history-thread"}}
+        async with self.session_factory() as session:
+            task = await ScheduledTaskRepository(session).create(
+                owner_id=self.owner.id, prompt="Проверка"
+            )
+        metadata = {
+            "is_scheduled": True,
+            "task_id": str(task.id),
+            "history_target": {
+                "bot_id": str(self.bot.id),
+                "external_chat_id": "-1001",
+            },
+        }
+        with (
+            patch(
+                "giga_agent.channels.telegram.chat_history.get_session_factory",
+                new=AsyncMock(return_value=self.session_factory),
+            ),
+            patch(
+                "giga_agent.channels.telegram.chat_history.get_thread_metadata",
+                new=AsyncMock(return_value=metadata),
+            ),
+        ):
+            self.assertEqual(await get_history_tools(user, config), [])
+            async with self.session_factory() as session:
+                contact = await session.get(ChannelContact, self.contact.id)
+                contact.is_default_task_recipient = True
+                await session.commit()
+            self.assertEqual(len(await get_history_tools(user, config)), 2)
+
+            async with self.session_factory() as session:
+                session.add(
+                    ChannelContact(
+                        bot_id=self.bot.id,
+                        external_chat_id="-1002",
+                        chat_type="group",
+                        is_approved=True,
+                        is_default_task_recipient=True,
+                    )
+                )
+                await session.commit()
+            self.assertEqual(await get_history_tools(user, config), [])
+
+            async with self.session_factory() as session:
+                task_row = await session.get(type(task), task.id)
+                task_row.targets = [
+                    {
+                        "bot_id": str(self.bot.id),
+                        "external_chat_id": "42",
+                        "external_user_id": None,
+                    }
+                ]
+                session.add(
+                    ChannelContact(
+                        bot_id=self.bot.id,
+                        external_chat_id="42",
+                        chat_type="private",
+                        is_approved=True,
+                    )
+                )
+                await session.commit()
+            metadata["history_target"]["external_chat_id"] = "42"
+            self.assertEqual(await get_history_tools(user, config), [])
 
     async def test_contact_delete_cascades_history(self) -> None:
         await self._add(1, "Удаляемое сообщение")

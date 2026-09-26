@@ -11,6 +11,7 @@ from giga_agent.channels.telegram.constants import (
     GROUP_CHAT_TYPES,
     SUPPORTED_CHAT_TYPES,
 )
+from giga_agent.channels.telegram.message_context import get_message_text
 from giga_agent.channels.telegram.runtime import (
     get_bot_username,
     get_contact_external_user_id,
@@ -80,7 +81,7 @@ class TelegramAccessService:
         if self.is_current_bot_message(reply_message):
             return True
 
-        text = message.text or message.caption or ""
+        text = get_message_text(message)
         entities = list(getattr(message, "entities", None) or []) + list(
             getattr(message, "caption_entities", None) or []
         )

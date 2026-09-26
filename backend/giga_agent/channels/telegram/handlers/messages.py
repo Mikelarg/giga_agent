@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import types as tg_types
 
+from giga_agent.channels.telegram.constants import GROUP_CHAT_TYPES
 from giga_agent.channels.telegram.message_context import (
     build_message_context,
     build_reply_kwargs,
+    get_message_text,
 )
 from giga_agent.channels.telegram.message_tool import build_telegram_message_tool_schema
 from giga_agent.channels.telegram.runtime import build_memory_tags
@@ -20,6 +23,7 @@ from giga_agent.channels.telegram.services.message_tool_runtime import (
     TelegramMessageToolRuntime,
 )
 from giga_agent.channels.telegram.services.threads import TelegramThreadService
+from giga_agent.channels.telegram.services.status import TelegramStatusService
 from giga_agent.core.db import get_session_factory
 from giga_agent.core.logging import get_logger
 from giga_agent.models.channel import ChannelBot, ChannelBotRepository
@@ -36,12 +40,14 @@ class TelegramMessageHandlers:
         thread_service: TelegramThreadService,
         media_service: TelegramMediaService,
         message_tool_runtime: TelegramMessageToolRuntime,
+        status_service: TelegramStatusService,
     ):
         self.bot_row = bot_row
         self.access_service = access_service
         self.thread_service = thread_service
         self.media_service = media_service
         self.message_tool_runtime = message_tool_runtime
+        self.status_service = status_service
 
     async def handle_start(self, message: tg_types.Message) -> None:
         if not await self.access_service.ensure_supported_chat(message):
@@ -52,7 +58,96 @@ class TelegramMessageHandlers:
             "Просто напишите мне сообщение, и я отвечу.\n"
             "Можете отправлять фото, документы и голосовые.\n"
             "/new — начать новый диалог (сбросить контекст)"
+            "\n/status — узнать, что я делаю сейчас"
+            "\n/stop — остановить текущую работу"
         )
+
+    async def _command_thread_id(self, message: tg_types.Message) -> str | None:
+        await self.access_service.register_contact(message)
+        async with (await get_session_factory())() as session:
+            repo = ChannelBotRepository(session)
+            contact = await repo.get_contact(self.bot_row.id, str(message.chat.id))
+            if contact is None or not contact.is_approved:
+                await message.answer(
+                    "⏳ Ваш контакт ожидает подтверждения. "
+                    "Владелец бота должен одобрить вас в настройках."
+                )
+                return None
+            thread = await repo.get_thread(
+                self.bot_row.id,
+                str(message.chat.id),
+                self.thread_service.resolve_external_user_id(message),
+            )
+            return thread.langgraph_thread_id if thread else ""
+
+    async def handle_status(self, message: tg_types.Message) -> None:
+        if not await self.access_service.ensure_supported_chat(message):
+            return
+        thread_id = await self._command_thread_id(message)
+        if thread_id is None:
+            return
+        if not thread_id:
+            await message.answer("Сейчас агент не выполняет задачу.")
+            return
+        client = self.thread_service.create_client(self.thread_service.create_token())
+        try:
+            runs = await self.status_service.active_runs(client, thread_id)
+            if not runs:
+                await message.answer("Сейчас агент не выполняет задачу.")
+                return
+            if await self.message_tool_runtime.get_pending_message_tool_calls(
+                client, thread_id
+            ):
+                await message.answer("Сейчас агент ожидает вашего ответа.")
+                return
+            run_id = str(runs[0].get("run_id") or "")
+            if not run_id:
+                await message.answer("⏳ Агент работает над запросом.")
+                return
+            await message.answer(
+                await self.status_service.get_status(client, thread_id, run_id)
+            )
+        except Exception:
+            logger.warning("Failed to fetch Telegram status", exc_info=True)
+            await message.answer("⚠️ Не удалось получить статус. Попробуйте позже.")
+        finally:
+            await client.aclose()
+
+    async def handle_stop(self, message: tg_types.Message) -> None:
+        if not await self.access_service.ensure_supported_chat(message):
+            return
+        thread_id = await self._command_thread_id(message)
+        if thread_id is None:
+            return
+        if not thread_id:
+            await message.answer("Сейчас нет активного запуска для остановки.")
+            return
+        client = self.thread_service.create_client(self.thread_service.create_token())
+        try:
+            runs = await self.status_service.active_runs(client, thread_id)
+            if not runs:
+                await message.answer("Сейчас нет активного запуска для остановки.")
+                return
+            if await self.message_tool_runtime.get_pending_message_tool_calls(
+                client, thread_id
+            ):
+                await message.answer("Сейчас нет активного запуска для остановки.")
+                return
+            await self.status_service.mark_stopped(thread_id)
+            count = await self.thread_service.stop_thread_runs(client, thread_id)
+            if count:
+                await message.answer(
+                    "🛑 Работа остановлена. Можете написать новую задачу."
+                )
+            else:
+                await self.status_service.clear_stopped(thread_id)
+                await message.answer("Сейчас нет активного запуска для остановки.")
+        except Exception:
+            await self.status_service.clear_stopped(thread_id)
+            logger.warning("Failed to stop Telegram run", exc_info=True)
+            await message.answer("⚠️ Не удалось остановить работу. Попробуйте ещё раз.")
+        finally:
+            await client.aclose()
 
     async def handle_new(self, message: tg_types.Message) -> None:
         if not await self.access_service.ensure_supported_chat(message):
@@ -90,7 +185,9 @@ class TelegramMessageHandlers:
         if contact_message is None:
             contact_message = message
         chat_id = message.chat.id
-        raw_text = message.text or message.caption or ""
+        if reply_to_message_id is None and message.chat.type in GROUP_CHAT_TYPES:
+            reply_to_message_id = message.message_id
+        raw_text = get_message_text(message)
         text = (
             text_override
             if text_override is not None
@@ -101,8 +198,10 @@ class TelegramMessageHandlers:
 
         logger.info("Telegram message from chat %s: %s", chat_id, text[:100])
         request_start = datetime.now(timezone.utc)
+        request_start_epoch = time.time()
 
         client = None
+        thread_id: str | None = None
         try:
             session_factory = await get_session_factory()
 
@@ -154,7 +253,8 @@ class TelegramMessageHandlers:
             elif await self.message_tool_runtime.has_active_run(client, thread_id):
                 await message.answer(
                     "⏳ Бот ещё обрабатывает предыдущее сообщение. "
-                    "Дождитесь завершения работы и попробуйте снова.",
+                    "Напишите /status, чтобы узнать, что он делает, "
+                    "или /stop, чтобы остановить. Дождитесь завершения и повторите запрос.",
                     **reply_kwargs,
                 )
                 return
@@ -164,7 +264,7 @@ class TelegramMessageHandlers:
                 reply_text = ""
                 reply_file_data: list[dict[str, Any]] = []
                 if reply_message is not None:
-                    reply_text = reply_message.text or reply_message.caption or ""
+                    reply_text = get_message_text(reply_message)
                     reply_file_data = await self.media_service.collect_incoming_files(
                         reply_message,
                         token,
@@ -295,6 +395,11 @@ class TelegramMessageHandlers:
                 )
                 return
 
+            if await self.status_service.was_stopped_since(
+                thread_id, request_start_epoch
+            ):
+                return
+
             await self.media_service.send_run_result(
                 message=message,
                 token=token,
@@ -304,6 +409,10 @@ class TelegramMessageHandlers:
             )
 
         except asyncio.TimeoutError:
+            if thread_id and await self.status_service.was_stopped_since(
+                thread_id, request_start_epoch
+            ):
+                return
             logger.warning(
                 "Timeout handling Telegram message for user %s (chat %s)",
                 user_id,
@@ -328,6 +437,10 @@ class TelegramMessageHandlers:
             except Exception:
                 pass
         except Exception as exc:
+            if thread_id and await self.status_service.was_stopped_since(
+                thread_id, request_start_epoch
+            ):
+                return
             logger.exception("Error handling Telegram message for user %s", user_id)
             error_str = str(exc)
             if "UserInterrupt" in error_str:

@@ -73,9 +73,20 @@ class AnalyzeImageRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_openai_runtime_uses_base_implementation(self):
         self.assertIs(OpenAIRuntime.analyze_images, BaseLLMRuntime.analyze_images)
 
-    def test_deepseek_runtime_does_not_support_image_analysis(self):
-        runtime = DeepSeekRuntime(connector=_ConnectorStub(), model_id="deepseek")
-        self.assertFalse(runtime.can_analyze_images())
+    def test_deepseek_image_analysis_is_limited_to_flash_models(self):
+        for model_id in (
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ):
+            with self.subTest(model_id=model_id):
+                runtime = DeepSeekRuntime(connector=_ConnectorStub(), model_id=model_id)
+                self.assertTrue(runtime.can_analyze_images())
+
+        for model_id in ("deepseek-v4-pro", "deepseek-chat", "deepseek"):
+            with self.subTest(model_id=model_id):
+                runtime = DeepSeekRuntime(connector=_ConnectorStub(), model_id=model_id)
+                self.assertFalse(runtime.can_analyze_images())
 
     async def test_gigachat_runtime_analyze_images_uses_ordered_attachments(self):
         llm_stub = types.SimpleNamespace(

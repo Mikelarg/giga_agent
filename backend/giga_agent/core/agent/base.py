@@ -100,7 +100,7 @@ class BaseAgent(BaseModel):
     _app: FastAPI = PrivateAttr()
     _graph: CompiledStateGraph[AgentState, Context] = PrivateAttr()
     _module_ids: Set[str] = PrivateAttr(default_factory=set)
-    _tools_cache: Dict[tuple[UUID | None, int, bool, bool], List[BaseTool]] = (
+    _tools_cache: Dict[tuple[UUID | None, int, bool, bool, bool], List[BaseTool]] = (
         PrivateAttr(default_factory=dict)
     )
     _agent_modules: tuple[BaseModule, ...] = PrivateAttr(default_factory=tuple)
@@ -412,20 +412,30 @@ class BaseAgent(BaseModel):
             user_fingerprint = id(user)
 
         is_channel = False
-        is_telegram_channel = False
+        is_scheduled = False
+        has_telegram_history = False
         if isinstance(config, dict):
             metadata = await get_thread_metadata(
                 config, get_thread_id_from_config(config)
             )
             is_channel = bool(metadata.get("is_channel"))
-            is_telegram_channel = metadata.get("channel") == "telegram"
+            is_scheduled = bool(metadata.get("is_scheduled"))
+            has_telegram_history = (
+                metadata.get("channel") == "telegram" and not is_scheduled
+            ) or bool(is_scheduled and metadata.get("history_target"))
         no_python_tool = bool(
             ((config or {}).get("configurable") or {}).get("no_python_tool")
         )
-        cache_key = (user_id, user_fingerprint, is_channel, no_python_tool)
+        cache_key = (
+            user_id,
+            user_fingerprint,
+            is_channel,
+            is_scheduled,
+            no_python_tool,
+        )
         cached = None if execution is not None else self._tools_cache.get(cache_key)
         if cached is not None:
-            if is_telegram_channel:
+            if has_telegram_history:
                 from giga_agent.channels.telegram.chat_history import get_history_tools
 
                 return [*cached, *await get_history_tools(user, config)]
@@ -457,7 +467,7 @@ class BaseAgent(BaseModel):
             self._tools_cache[cache_key] = all_tools
         # Channel history is bound to the current LangGraph thread, so it must
         # never enter the shared tools cache above.
-        if is_telegram_channel:
+        if has_telegram_history:
             from giga_agent.channels.telegram.chat_history import get_history_tools
 
             all_tools = [*all_tools, *await get_history_tools(user, config)]

@@ -27,6 +27,7 @@ from giga_agent.models.scheduled_task import (
 )
 from giga_agent.models.users import UserRepository
 from giga_agent.scheduled.cron import compute_next_run
+from giga_agent.scheduled.targets import resolve_task_targets
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,7 @@ async def _run_graph(
     token: str,
     run_timeout: int,
     memory_tags: list[str] | None = None,
+    history_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the agent graph headless on a fresh thread under the owner's identity."""
     # Inherit the memory scope of the context the task was scheduled in (e.g. the
@@ -70,6 +72,7 @@ async def _run_graph(
                 # the main sidebar list (where threads are filtered by graph_id).
                 "is_scheduled": True,
                 "graph_id": "giga_agent",
+                **({"history_target": history_target} if history_target else {}),
             },
         )
         thread_id = thread["thread_id"]
@@ -104,15 +107,34 @@ async def _run_graph(
         await client.aclose()
 
 
-def _targets_from_defaults(contacts: list) -> list[dict[str, Any]]:
-    return [
-        {
-            "bot_id": str(c.bot_id),
-            "external_chat_id": c.external_chat_id,
-            "external_user_id": c.external_user_id,
-        }
-        for c in contacts
-    ]
+async def _history_target(
+    channels: ChannelBotRepository,
+    owner_id: uuid.UUID,
+    targets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Bind history only when this run delivers to one approved Telegram group."""
+    if len(targets) != 1:
+        return None
+    target = targets[0]
+    if target.get("external_user_id") is not None:
+        return None
+    try:
+        bot_id = uuid.UUID(str(target["bot_id"]))
+        chat_id = str(target["external_chat_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    bot = await channels.get_by_id(bot_id)
+    contact = await channels.get_contact(bot_id, chat_id)
+    if (
+        bot is None
+        or bot.user_id != owner_id
+        or bot.channel_type != "telegram"
+        or contact is None
+        or not contact.is_approved
+        or contact.chat_type not in {"group", "supergroup"}
+    ):
+        return None
+    return {"bot_id": str(bot_id), "external_chat_id": chat_id}
 
 
 async def _deliver_to_targets(
@@ -202,6 +224,8 @@ async def execute_due_task(
             return
 
         owner_id = task.owner_id
+        chan_repo = ChannelBotRepository(session)
+        targets = await resolve_task_targets(chan_repo, task)
 
         # Identity for both the graph run and attachment downloads during delivery.
         try:
@@ -221,6 +245,7 @@ async def execute_due_task(
                     token=token,
                     run_timeout=run_timeout,
                     memory_tags=task.memory_tags,
+                    history_target=await _history_target(chan_repo, owner_id, targets),
                 )
                 parts = render_run_result(result)
                 await repo.save_result(task, parts)
@@ -228,13 +253,6 @@ async def execute_due_task(
                 logger.exception("Scheduled task %s run failed", task.id)
                 await _finalize(repo, task, STATUS_FAILED, last_error=str(exc)[:2000])
                 return
-
-        # Resolve delivery targets: explicit targets, else default recipients.
-        chan_repo = ChannelBotRepository(session)
-        targets = list(task.targets or [])
-        if not targets:
-            defaults = await chan_repo.list_default_recipients_for_owner(owner_id)
-            targets = _targets_from_defaults(defaults)
 
         if not targets:
             await _finalize(
@@ -281,6 +299,8 @@ async def run_task_now(
 
         owner_id = task.owner_id
         now = datetime.now(timezone.utc)
+        chan_repo = ChannelBotRepository(session)
+        targets = await resolve_task_targets(chan_repo, task)
 
         try:
             token = await _make_owner_token(owner_id)
@@ -291,6 +311,7 @@ async def run_task_now(
                 token=token,
                 run_timeout=run_timeout,
                 memory_tags=task.memory_tags,
+                history_target=await _history_target(chan_repo, owner_id, targets),
             )
             parts = render_run_result(result)
         except Exception as exc:
@@ -301,12 +322,6 @@ async def run_task_now(
                 last_error=f"manual run failed: {exc}"[:2000],
             )
             return
-
-        chan_repo = ChannelBotRepository(session)
-        targets = list(task.targets or [])
-        if not targets:
-            defaults = await chan_repo.list_default_recipients_for_owner(owner_id)
-            targets = _targets_from_defaults(defaults)
 
         if not targets:
             await repo.update(

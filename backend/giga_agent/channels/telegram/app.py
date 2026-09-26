@@ -16,12 +16,14 @@ from aiogram.types import (
 from giga_agent.channels.telegram.bot import create_telegram_bot
 from giga_agent.channels.telegram.handlers.callbacks import TelegramCallbackHandlers
 from giga_agent.channels.telegram.handlers.messages import TelegramMessageHandlers
+from giga_agent.channels.telegram.message_context import get_message_text
 from giga_agent.channels.telegram.runtime import get_bot_token
 from giga_agent.channels.telegram.services.access import TelegramAccessService
 from giga_agent.channels.telegram.services.media import TelegramMediaService
 from giga_agent.channels.telegram.services.message_tool_runtime import (
     TelegramMessageToolRuntime,
 )
+from giga_agent.channels.telegram.services.status import TelegramStatusService
 from giga_agent.channels.telegram.services.threads import TelegramThreadService
 from giga_agent.core.logging import get_logger
 from giga_agent.models.channel import ChannelBot
@@ -51,7 +53,7 @@ def _has_supported_attachment(message: tg_types.Message | None) -> bool:
 def _has_processable_reply_content(message: tg_types.Message | None) -> bool:
     if message is None:
         return False
-    text = message.text or message.caption or ""
+    text = get_message_text(message)
     return bool(text or _has_supported_attachment(message))
 
 
@@ -75,12 +77,16 @@ class TelegramBotApp:
         self.message_tool_runtime = TelegramMessageToolRuntime(
             media_service=self.media_service,
         )
+        self.status_service = TelegramStatusService(
+            bot_id=bot_row.id, owner_id=bot_row.user_id
+        )
         self.message_handlers = TelegramMessageHandlers(
             bot_row=bot_row,
             access_service=self.access_service,
             thread_service=self.thread_service,
             media_service=self.media_service,
             message_tool_runtime=self.message_tool_runtime,
+            status_service=self.status_service,
         )
         self.callback_handlers = TelegramCallbackHandlers(
             bot_row=bot_row,
@@ -121,6 +127,14 @@ class TelegramBotApp:
         async def _on_new(message: tg_types.Message):
             await self.message_handlers.handle_new(message)
 
+        @self.dp.message(Command("status"))
+        async def _on_status(message: tg_types.Message):
+            await self.message_handlers.handle_status(message)
+
+        @self.dp.message(Command("stop"))
+        async def _on_stop(message: tg_types.Message):
+            await self.message_handlers.handle_stop(message)
+
         @self.dp.message(Command("message"))
         async def _on_message_command(message: tg_types.Message):
             await self.handle_message_command(message)
@@ -140,7 +154,7 @@ class TelegramBotApp:
 
         @self.dp.message()
         async def _on_message(message: tg_types.Message):
-            text = message.text or message.caption or ""
+            text = get_message_text(message)
             has_file = bool(
                 message.photo
                 or message.document
@@ -220,7 +234,7 @@ class TelegramBotApp:
 
     async def handle_message_command(self, message: tg_types.Message) -> None:
         command_text = self.access_service.strip_command_prefix(
-            message.text or message.caption or "",
+            get_message_text(message),
             "message",
         )
         has_reply_content = _has_processable_reply_content(message.reply_to_message)
@@ -267,10 +281,14 @@ class TelegramBotApp:
             BotCommand(command="start", description="Запустить бота"),
             BotCommand(command="new", description="Сбросить контекст диалога"),
             BotCommand(command="message", description="Отправить сообщение агенту"),
+            BotCommand(command="status", description="Что сейчас делает агент"),
+            BotCommand(command="stop", description="Остановить текущую работу"),
         ]
         group_commands = [
             BotCommand(command="new", description="Сбросить контекст диалога"),
             BotCommand(command="message", description="Отправить сообщение агенту"),
+            BotCommand(command="status", description="Что сейчас делает агент"),
+            BotCommand(command="stop", description="Остановить текущую работу"),
         ]
 
         await self.bot.set_my_commands(

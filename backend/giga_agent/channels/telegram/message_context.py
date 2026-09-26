@@ -9,6 +9,57 @@ from aiogram import types as tg_types
 from giga_agent.channels.telegram.utils import _describe_uploaded_files
 
 
+def _rich_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_rich_text(item) for item in value)
+    if value is None:
+        return ""
+    return _rich_text(getattr(value, "text", None)) or getattr(
+        value, "alternative_text", ""
+    )
+
+
+def _rich_block_text(block: Any) -> str:
+    text = _rich_text(getattr(block, "text", None))
+    summary = _rich_text(getattr(block, "summary", None))
+    caption = getattr(block, "caption", None)
+    caption_text = _rich_text(caption)
+    nested = [_rich_block_text(item) for item in (getattr(block, "blocks", None) or [])]
+    for item in getattr(block, "items", None) or []:
+        nested.append(
+            " ".join(
+                part
+                for part in (
+                    getattr(item, "label", None),
+                    "\n".join(
+                        _rich_block_text(child)
+                        for child in (getattr(item, "blocks", None) or [])
+                    ),
+                )
+                if part
+            )
+        )
+    for row in getattr(block, "cells", None) or []:
+        nested.append(" | ".join(_rich_text(cell.text) for cell in row))
+    return "\n".join(part for part in (text, summary, *nested, caption_text) if part)
+
+
+def get_message_text(message: tg_types.Message | None) -> str:
+    if message is None:
+        return ""
+    text = message.text or message.caption or ""
+    if text:
+        return text
+    rich_message = getattr(message, "rich_message", None)
+    if rich_message is None:
+        return ""
+    return "\n\n".join(
+        part for block in rich_message.blocks if (part := _rich_block_text(block))
+    )
+
+
 def _format_message_author(message: tg_types.Message | None) -> tuple[str, str]:
     if message is None:
         return "unknown", "Unknown"

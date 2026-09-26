@@ -272,6 +272,8 @@ async def _resolve_channel_prompt(config: RunnableConfig | None) -> str:
         return ""
 
     metadata = await get_thread_metadata(config, get_thread_id_from_config(config))
+    if metadata.get("is_scheduled"):
+        return ""
     channel_type = metadata.get("channel")
     if not isinstance(channel_type, str) or not channel_type.strip():
         return ""

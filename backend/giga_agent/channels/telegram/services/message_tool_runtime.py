@@ -15,6 +15,7 @@ from giga_agent.channels.telegram.constants import (
 from giga_agent.channels.telegram.message_context import (
     build_message_context_payload,
     build_reply_kwargs,
+    get_message_text,
 )
 from giga_agent.channels.telegram.message_tool import (
     TelegramMessageToolPayload,
@@ -397,9 +398,7 @@ class TelegramMessageToolRuntime:
     ) -> dict[str, Any] | None:
         pending_tool_call = pending_tool_calls[-1]
         reply_message = getattr(message, "reply_to_message", None)
-        reply_text = (
-            reply_message.text or reply_message.caption or "" if reply_message else ""
-        )
+        reply_text = get_message_text(reply_message)
         reply_file_data: list[dict[str, Any]] = []
         if reply_message is not None:
             reply_file_data = await self.media_service.collect_incoming_files(
@@ -421,7 +420,7 @@ class TelegramMessageToolRuntime:
                 thread_id,
             )
             file_data.extend(extra_files)
-        text = message.text or message.caption or ""
+        text = get_message_text(message)
         response_text = text or _describe_uploaded_files(file_data)
         message_context = build_message_context_payload(
             label="Входящее сообщение",

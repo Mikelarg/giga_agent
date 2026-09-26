@@ -50,7 +50,7 @@ class TelegramThreadService:
     def resolve_external_user_id(self, message: Any) -> str | None:
         return get_thread_external_user_id(message)
 
-    async def stop_thread_runs(self, client: Any, thread_id: str) -> None:
+    async def stop_thread_runs(self, client: Any, thread_id: str) -> int:
         cancelled_run_ids: set[str] = set()
         for status in ("running", "pending"):
             try:
@@ -73,6 +73,7 @@ class TelegramThreadService:
                 len(cancelled_run_ids),
                 thread_id,
             )
+        return len(cancelled_run_ids)
 
     async def _stop_thread_runs_background(self, thread_id: str) -> None:
         try:

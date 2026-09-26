@@ -25,6 +25,7 @@ from sqlalchemy import Select, and_, asc, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from giga_agent.channels.telegram.constants import GROUP_CHAT_TYPES
+from giga_agent.channels.telegram.message_context import get_message_text
 from giga_agent.core.agent.tool_policy import ToolEffect, tool_extras
 from giga_agent.core.db import get_session_factory
 from giga_agent.core.logging import get_logger
@@ -35,7 +36,11 @@ from giga_agent.models.channel import (
     ChatMessage,
 )
 from giga_agent.models.users import UserShort
-from giga_agent.utils.thread_metadata import get_thread_id_from_config
+from giga_agent.scheduled.targets import resolve_task_targets
+from giga_agent.utils.thread_metadata import (
+    get_thread_id_from_config,
+    get_thread_metadata,
+)
 
 logger = get_logger(__name__)
 MAX_MESSAGES = 100
@@ -124,7 +129,7 @@ def telegram_message_payload(
     edited: bool = False,
 ) -> tuple[str, dict[str, Any], datetime]:
     """Extract a deliberately small, JSON-safe Telegram representation."""
-    text = message.text or message.caption or ""
+    text = get_message_text(message)
     entities = (
         getattr(message, "entities", None)
         or getattr(message, "caption_entities", None)
@@ -392,10 +397,36 @@ async def _resolve_contact(
     async with factory() as session:
         channels = ChannelBotRepository(session)
         thread = await channels.get_thread_by_langgraph_id(thread_id)
-        if thread is None:
-            raise ValueError("История сообщений доступна только из Telegram-группы")
-        bot = await channels.get_by_id(thread.bot_id)
-        contact = await channels.get_contact(thread.bot_id, thread.external_chat_id)
+        if thread is not None:
+            bot_id = thread.bot_id
+            chat_id = thread.external_chat_id
+        else:
+            metadata = await get_thread_metadata(config, thread_id)
+            if not metadata.get("is_scheduled"):
+                raise ValueError("История сообщений доступна только из Telegram-группы")
+            target = metadata.get("history_target")
+            try:
+                task_id = uuid.UUID(str(metadata["task_id"]))
+                bot_id = uuid.UUID(str(target["bot_id"]))
+                chat_id = str(target["external_chat_id"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("История этой группы недоступна") from None
+            from giga_agent.models.scheduled_task import ScheduledTaskRepository
+
+            task = await ScheduledTaskRepository(session).get_for_owner(
+                task_id, user.id
+            )
+            if task is None:
+                raise ValueError("История этой группы недоступна")
+            targets = await resolve_task_targets(channels, task)
+            if len(targets) != 1 or (
+                str(targets[0].get("bot_id")) != str(bot_id)
+                or str(targets[0].get("external_chat_id")) != chat_id
+                or targets[0].get("external_user_id") is not None
+            ):
+                raise ValueError("История этой группы недоступна")
+        bot = await channels.get_by_id(bot_id)
+        contact = await channels.get_contact(bot_id, chat_id)
         if (
             bot is None
             or bot.channel_type != "telegram"
@@ -527,7 +558,7 @@ async def _query_messages(
 async def get_history_tools(
     user: UserShort, config: dict[str, Any] | None
 ) -> list[BaseTool]:
-    """Return history tools only for a Telegram channel run; invoke rechecks access."""
+    """Return scoped history tools; each invocation rechecks access."""
     try:
         await _resolve_contact(user, config)
     except ValueError:
