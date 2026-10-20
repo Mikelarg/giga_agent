@@ -81,7 +81,7 @@ class SubAgentLegacyModule(BaseModule):
         tools: list[BaseTool] = []
         is_cli = get_settings().giga_agent_runtime == "cli"
 
-        if caps.has_llm:
+        if caps.has_llm and not is_cli:
             tools.append(
                 _legacy_tool(
                     "giga_agent.modules.subagents_legacy.agents.lean_canvas",
@@ -149,7 +149,7 @@ class SubAgentLegacyModule(BaseModule):
         instructions: list[str] = []
         is_cli = get_settings().giga_agent_runtime == "cli"
 
-        if caps.has_llm and (caps.has_search or is_cli):
+        if caps.has_llm and caps.has_search and not is_cli:
             instructions.append(
                 "- **lean_canvas** — Создает lean canvas. "
                 "Полезен при проработке идей, стартапов."

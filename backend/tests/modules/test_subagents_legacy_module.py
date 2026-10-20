@@ -118,6 +118,34 @@ class SubagentsLegacyModuleTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_cli_hides_lean_canvas_tool_and_instructions(self):
+        module = SubAgentLegacyModule()
+        user = types.SimpleNamespace(settings={})
+        caps = types.SimpleNamespace(
+            has_llm=True,
+            has_search=True,
+            has_image_generator=True,
+            has_twogis_token=True,
+            has_salute_speech=True,
+        )
+        with (
+            self._patch_modules(),
+            patch(
+                "giga_agent.modules.subagents_legacy.module.get_settings",
+                return_value=types.SimpleNamespace(giga_agent_runtime="cli"),
+            ),
+            patch(
+                "giga_agent.modules.subagents_legacy.module._get_legacy_capabilities",
+                return_value=caps,
+            ),
+        ):
+            tools = await module.get_tools(user=user, agent=object())
+            prompt = await module.get_instructions(user=user, agent=object())
+
+        self.assertEqual([tool.name for tool in tools], ["create_meme"])
+        self.assertNotIn("lean_canvas", prompt)
+        self.assertIn("create_meme", prompt)
+
     def test_get_subgraphs_returns_expected_legacy_entries(self):
         module = SubAgentLegacyModule()
         self.assertEqual(
