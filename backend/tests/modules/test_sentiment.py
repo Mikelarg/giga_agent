@@ -1,13 +1,20 @@
 import tempfile
 import unittest
+import asyncio
+import subprocess
+import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
 from giga_agent.modules.repl.repl_tools.sentiment import (
     NumpySentimentModel,
-    _preload_models,
+    _load_sentiment_model,
+    _model_paths,
+    predict_sentiments,
 )
+from giga_agent.modules.repl.repl_tools import sentiment
 
 
 class NumpySentimentModelTests(unittest.TestCase):
@@ -29,7 +36,7 @@ class NumpySentimentModelTests(unittest.TestCase):
         self.assertEqual(predictions.tolist(), ["negative", "positive", "negative"])
 
     def test_bundled_models_load(self):
-        models = _preload_models()
+        models = {key: _load_sentiment_model(key) for key in _model_paths()}
 
         self.assertEqual(
             set(models),
@@ -52,3 +59,47 @@ class NumpySentimentModelTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Embedding dimensions"):
             model.predict_labels(np.zeros((1, 2)))
+
+    def test_import_does_not_start_preloading(self):
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                """
+from unittest.mock import patch
+import numpy
+with patch('numpy.load', side_effect=AssertionError('unexpected model load')), \
+     patch('threading.Thread.start', side_effect=AssertionError('unexpected thread')):
+    import giga_agent.modules.repl.repl_tools.availability
+""",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_only_requested_model_is_loaded_and_cached(self):
+        model = object()
+        paths = {"selected": Path("selected.npz"), "other": Path("broken.npz")}
+        with (
+            patch.dict(sentiment._SENTIMENT_MODELS, {}, clear=True),
+            patch.object(sentiment, "_model_paths", return_value=paths),
+            patch.object(NumpySentimentModel, "load", return_value=model) as load,
+        ):
+            self.assertIs(_load_sentiment_model("selected"), model)
+            self.assertIs(_load_sentiment_model("selected"), model)
+            load.assert_called_once_with(paths["selected"])
+            self.assertEqual(set(sentiment._SENTIMENT_MODELS), {"selected"})
+
+    def test_missing_embeddings_do_not_load_classifier(self):
+        with (
+            patch.object(
+                sentiment,
+                "_resolve_user_embeddings",
+                new=AsyncMock(side_effect=ValueError("No embedding configured")),
+            ),
+            patch.object(sentiment, "_load_sentiment_model") as load,
+        ):
+            with self.assertRaisesRegex(ValueError, "No embedding configured"):
+                asyncio.run(predict_sentiments(texts=["test"], tool_runtime=object()))
+            load.assert_not_called()

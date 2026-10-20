@@ -70,75 +70,42 @@ def _build_model_key(file_path: Path) -> str | None:
     return key or None
 
 
-def _preload_models() -> dict[str, NumpySentimentModel]:
-    preloaded: dict[str, NumpySentimentModel] = {}
-    if not _MODELS_DIR.exists():
-        return preloaded
-    paths = sorted(_MODELS_DIR.glob(f"{_MODEL_PREFIX}*{_MODEL_SUFFIX}"))
-    if not paths:
-        return preloaded
+def _model_paths() -> dict[str, Path]:
+    return {
+        key: path
+        for path in _MODELS_DIR.glob(f"{_MODEL_PREFIX}*{_MODEL_SUFFIX}")
+        if (key := _build_model_key(path)) is not None
+    }
 
-    logger.info(
-        "Preloading sentiment models",
-        dir=str(_MODELS_DIR),
-        total=len(paths),
-    )
-    for idx, model_path in enumerate(paths, start=1):
-        key = _build_model_key(model_path)
-        if key is None:
-            continue
+
+_SENTIMENT_MODELS: dict[str, NumpySentimentModel] = {}
+_MODEL_LOAD_LOCK = threading.Lock()
+
+
+def _load_sentiment_model(model_id: str) -> NumpySentimentModel:
+    """Load only the requested classifier, once per process, on first use."""
+    with _MODEL_LOAD_LOCK:
+        if model_id in _SENTIMENT_MODELS:
+            return _SENTIMENT_MODELS[model_id]
+        paths = _model_paths()
+        model_path = paths.get(model_id)
+        if model_path is None:
+            available = ", ".join(sorted(paths)) or "нет"
+            raise ValueError(
+                "Для вашей embedding модели не настроена sentiment модель. "
+                "Попросите администратора настроить sentiment модель под вашу embedding модель. "
+                f"Текущая embedding модель: '{model_id}'. "
+                f"Доступные sentiment модели: {available}."
+            )
         started = time.monotonic()
+        model = NumpySentimentModel.load(model_path)
+        _SENTIMENT_MODELS[model_id] = model
         logger.info(
-            "Loading sentiment model",
-            key=key,
-            path=str(model_path),
-            progress=f"{idx}/{len(paths)}",
+            "Loaded sentiment model",
+            key=model_id,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
         )
-        try:
-            preloaded[key] = NumpySentimentModel.load(model_path)
-        except Exception:
-            logger.exception(
-                "Failed to load sentiment model",
-                key=key,
-                path=str(model_path),
-            )
-            raise
-        else:
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            logger.info(
-                "Loaded sentiment model",
-                key=key,
-                elapsed_ms=elapsed_ms,
-                progress=f"{idx}/{len(paths)}",
-            )
-    return preloaded
-
-
-_PRELOADED_SENTIMENT_MODELS: dict[str, NumpySentimentModel] = {}
-_MODELS_READY = threading.Event()
-
-
-def _preload_models_background() -> None:
-    try:
-        _PRELOADED_SENTIMENT_MODELS.update(_preload_models())
-    except Exception:
-        logger.exception("Background sentiment model preload failed")
-    finally:
-        _MODELS_READY.set()
-
-
-# Грузим модели в фоне, чтобы чтение файлов не блокировало импорт/старт приложения.
-threading.Thread(
-    target=_preload_models_background,
-    name="sentiment-preload",
-    daemon=True,
-).start()
-
-
-async def _ensure_models_ready() -> None:
-    """Дожидается окончания фоновой загрузки моделей, не блокируя event loop."""
-    if not _MODELS_READY.is_set():
-        await asyncio.to_thread(_MODELS_READY.wait)
+        return model
 
 
 async def _resolve_user_embeddings(
@@ -170,16 +137,7 @@ async def predict_sentiments(
         raise ValueError("tool_runtime is required for predict_sentiments.")
 
     embedding_runtime, embedding_model_id = await _resolve_user_embeddings(tool_runtime)
-    await _ensure_models_ready()
-    clf = _PRELOADED_SENTIMENT_MODELS.get(embedding_model_id)
-    if clf is None:
-        available = ", ".join(sorted(_PRELOADED_SENTIMENT_MODELS.keys())) or "нет"
-        raise ValueError(
-            "Для вашей embedding модели не настроена sentiment модель. "
-            "Попросите администратора настроить sentiment модель под вашу embedding модель. "
-            f"Текущая embedding модель: '{embedding_model_id}'. "
-            f"Доступные sentiment модели: {available}."
-        )
+    clf = await asyncio.to_thread(_load_sentiment_model, embedding_model_id)
 
     embeddings = await embedding_runtime.get_embeddings()
     embs = await embeddings.aembed_documents(texts)
