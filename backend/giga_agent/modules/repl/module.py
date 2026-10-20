@@ -5,11 +5,7 @@ from __future__ import annotations
 import keyword
 from typing import Any, List, Coroutine, Optional
 
-from giga_agent.modules.repl.repl_tools.llm import summarize
-from giga_agent.modules.repl.repl_tools.sentiment import (
-    predict_sentiments,
-    get_embeddings,
-)
+from giga_agent.modules.repl.repl_tools.availability import get_available_repl_tools
 from giga_agent.modules.repl.repl_tools.utils import describe_repl_tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
@@ -183,18 +179,11 @@ class ReplModule(BaseModule):
     label: str = "Песочница (REPL)"
     description: str = "Выполнение Python и shell-команд в изолированной среде"
     icon: str = "Terminal"
-    _repl_tools: List[Coroutine] = [predict_sentiments, summarize, get_embeddings]
 
     async def _get_tools(
         self, user: UserShort, agent: BaseAgent, *, config=None, **kwargs
     ) -> List[BaseTool]:
         python_disabled = _is_python_tool_disabled(config)
-        if not python_disabled:
-            if python.extras is None:
-                python.extras = {"repl_tools": self._repl_tools}
-            else:
-                python.extras["repl_tools"] = self._repl_tools
-
         tools: List[BaseTool] = [shell, await_shell]
         if not python_disabled:
             tools.insert(0, python)
@@ -260,7 +249,9 @@ class ReplModule(BaseModule):
             + sandbox_prompt
             + get_user_secrets_prompt(user, include_python=not python_disabled)
             + (
-                generate_repl_tools_description(self._repl_tools, all_tools)
+                generate_repl_tools_description(
+                    get_available_repl_tools(config), all_tools
+                )
                 if not python_disabled
                 else ""
             )

@@ -54,6 +54,7 @@ dependencies = [
     "pdfminer-six>=20260107",
     "psycopg[binary]>=3.3.3,<4.0.0",
     "httpx~=0.28.1",
+    "truststore>=0.10.4,<1.0.0",
     "langchain-text-splitters>=1.1.1,<2.0.0",
     "langchain-postgres==0.0.17",
     "qdrant-client>=1.17.1,<2.0.0",

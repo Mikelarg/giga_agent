@@ -8,6 +8,15 @@ tests and external users can still import/patch `CLIException`, `dev`,
 
 from __future__ import annotations
 
+import os
+
+import truststore
+
+# Initialize before importing HTTP clients through CLI command modules.
+# Match LangGraph API's system certificate handling and opt-out.
+if os.getenv("DISABLE_TRUSTSTORE", "").lower() != "true":
+    truststore.inject_into_ssl()
+
 import asyncio as asyncio
 
 from .migrations.common import apply_migrations

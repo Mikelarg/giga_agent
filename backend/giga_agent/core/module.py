@@ -248,9 +248,9 @@ class BaseModule(Serializable):
         """
         from giga_agent.conf import get_settings
 
-        # В CLI-режиме нет БД интеграций — считаем провайдеры подключёнными.
+        # В CLI-режиме нет авторизации интеграций — не выдаём их инструменты.
         if get_settings().giga_agent_runtime == "cli":
-            return True
+            return False
         user_id = getattr(user, "id", None)
         if user_id is None:
             return False

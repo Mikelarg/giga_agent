@@ -1,13 +1,18 @@
 import asyncio
 import base64
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from giga_agent.core.agent.cli_conf import CliRuntimeConf
+from giga_agent.core.agent.runtime_resolver import CliRuntimeResolver, RuntimeResolver
+from giga_agent.models.users import UserShort
 from giga_agent.modules.repl.module import ReplModule, get_user_secrets_prompt
 from giga_agent.modules.repl.tools import (
     _build_attachment_info,
     _extract_upload_specs_from_display_data,
+    _extract_repl_tools_map,
     _format_python_error_location,
     _resolve_upload_prefix,
     get_user_secret_envs,
@@ -23,6 +28,51 @@ from giga_agent.core.agent.tool_policy import (
 
 
 class ReplToolsTests(unittest.TestCase):
+    def test_embedding_helpers_match_runtime_and_prompt(self):
+        module = ReplModule()
+        agent = SimpleNamespace(get_tools=AsyncMock(return_value=[python, shell]))
+        llm = {
+            "__type": "openai",
+            "connector": {"__type": "openai", "api_key": "dummy"},
+            "model_id": "dummy",
+        }
+        for mode in ("cli", "db"):
+            # Alternate availability to catch state leaking across users.
+            for has_embedding in (True, False, True, False):
+                with self.subTest(mode=mode, has_embedding=has_embedding):
+                    user = UserShort(
+                        id=uuid.uuid4(),
+                        email="test@example.com",
+                        embedding_id=(
+                            uuid.uuid4() if mode == "db" and has_embedding else None
+                        ),
+                    )
+                    if mode == "cli":
+                        conf = CliRuntimeConf.model_validate(
+                            {
+                                "llm": llm,
+                                "embedding": llm if has_embedding else None,
+                            }
+                        )
+                        resolver = CliRuntimeResolver(user, conf)
+                    else:
+                        resolver = RuntimeResolver(user)
+                    config = {"configurable": {}}
+                    resolver.inject(config)
+                    with patch(
+                        "giga_agent.modules.repl.module.get_sandbox_prompt",
+                        new=AsyncMock(return_value=""),
+                    ):
+                        prompt = asyncio.run(
+                            module.get_instructions(user, agent, config=config)
+                        )
+                    functions = _extract_repl_tools_map(config)
+                    self.assertIn("summarize", functions)
+                    self.assertIn("summarize", prompt)
+                    for name in ("get_embeddings", "predict_sentiments"):
+                        self.assertEqual(name in functions, has_embedding)
+                        self.assertEqual(name in prompt, has_embedding)
+
     def test_format_python_error_location(self):
         self.assertEqual(
             _format_python_error_location(

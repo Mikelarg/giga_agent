@@ -1567,6 +1567,7 @@ dependencies = [
     { name = "socksio" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
+    { name = "truststore" },
     { name = "typer" },
     { name = "websockets" },
 ]
@@ -1702,6 +1703,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0.0,<25.0.0" },
     { name = "sympy", marker = "extra == 'jupyter'", specifier = ">=1.13.0" },
     { name = "sympy", marker = "extra == 'jupyter-full'", specifier = ">=1.13.0,<2.0.0" },
+    { name = "truststore", specifier = ">=0.10.4,<1.0.0" },
     { name = "typer", extras = ["all"], specifier = "~=0.24.1" },
     { name = "websockets", specifier = ">=15.0.1,<16.0.0" },
     { name = "xarray", marker = "extra == 'jupyter-full'", specifier = ">=2025.0.0,<2026.0.0" },

@@ -35,6 +35,7 @@ from giga_agent.core.logging import get_logger
 from giga_agent.models import UserShort
 from giga_agent.models.file import FileResponse
 from giga_agent.modules.repl.args_monkey_patch import _parse_input
+from giga_agent.modules.repl.repl_tools.availability import get_available_repl_tools
 from giga_agent.sandbox.manager import (
     SandboxBusyError,
     SandboxManager,
@@ -215,17 +216,8 @@ def _is_valid_python_identifier(name: str) -> bool:
     return bool(name and name.isidentifier() and not keyword.iskeyword(name))
 
 
-def _extract_repl_tools_map() -> dict[str, Any]:
-    repl_tools_map: dict[str, Any] = {}
-    extras = getattr(python, "extras", None) or {}
-    repl_tools = extras.get("repl_tools", [])
-    if not isinstance(repl_tools, list):
-        return repl_tools_map
-    for repl_tool in repl_tools:
-        tool_name = getattr(repl_tool, "__name__", None)
-        if isinstance(tool_name, str) and tool_name:
-            repl_tools_map[tool_name] = repl_tool
-    return repl_tools_map
+def _extract_repl_tools_map(config=None) -> dict[str, Any]:
+    return {fn.__name__: fn for fn in get_available_repl_tools(config)}
 
 
 def _extract_tool_node_tools_map(
@@ -475,7 +467,7 @@ async def python(
     upload_prefix = _resolve_upload_prefix(runtime)
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
-    repl_tools_map = _extract_repl_tools_map()
+    repl_tools_map = _extract_repl_tools_map(runtime.config)
     tool_node_tools_map = _extract_tool_node_tools_map(tool_node)
 
     stripped_code = code.strip()
