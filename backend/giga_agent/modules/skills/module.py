@@ -78,7 +78,8 @@ class SkillsModule(BaseModule):
 
             execution = await resolve_execution_profile(agent, user, config)
             allowed = execution.skill_names if execution is not None else frozenset()
-            enabled = [s for s in enabled if s.name in allowed]
+            if execution is None or not execution.inherit_parent_tools:
+                enabled = [s for s in enabled if s.name in allowed]
         if not enabled:
             return None
 

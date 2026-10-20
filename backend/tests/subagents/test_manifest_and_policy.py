@@ -5,6 +5,7 @@ import io
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.tools import tool
@@ -16,6 +17,7 @@ from giga_agent.subagents.execution import AgentExecutionProfile, direct_tool_al
 from giga_agent.subagents.parser import AgentManifestError, parse_agent_manifest
 from giga_agent.subagents.registry import AgentRegistry
 from giga_agent.subagents.schema import AgentToolRules
+from giga_agent.modules.subagents.module import SubagentsModule
 
 
 def _manifest(agent_id: str = "researcher", *, extra: str = "") -> str:
@@ -44,6 +46,102 @@ def test_parse_agent_manifest_contract(tmp_path: Path) -> None:
     assert parsed.metadata.id == "researcher"
     assert parsed.metadata.tools.default == "read"
     assert parsed.prompt.startswith("Do the research")
+
+
+@pytest.mark.parametrize("mode", ["cli", "local", "docker"])
+def test_builtin_subagent_matches_runtime(mode: str) -> None:
+    module = SubagentsModule()
+    with patch(
+        "giga_agent.modules.subagents.module.get_settings",
+        return_value=SimpleNamespace(giga_agent_runtime=mode),
+    ):
+        registry = AgentRegistry(SimpleNamespace(all_modules=[module]))
+    (definition,) = registry.builtins
+    if mode == "cli":
+        assert definition.id == "cli_worker"
+        assert definition.inherit_parent_tools
+        definitions = asyncio.run(
+            registry.list_for_cli(SimpleNamespace(settings={}), config={})
+        )
+        assert definitions[0].readiness == "ready"
+    else:
+        assert definition.id == "researcher"
+        assert "search" in definition.modules
+        assert not definition.inherit_parent_tools
+
+
+def test_cli_inherited_tools_preserve_plan_mode_and_unknown_tool_policy() -> None:
+    from giga_agent.modules.repl.tools import python, shell
+    from giga_agent.modules.io.tools import write_file, delete_file
+
+    profile = AgentExecutionProfile(
+        definition=SimpleNamespace(tools=AgentToolRules()),
+        skill_names=frozenset(),
+        mcp_server_ids=frozenset(),
+        inherit_parent_tools=True,
+    )
+    for module_id, item in (
+        ("repl", shell),
+        ("repl", python),
+        ("io", write_file),
+        ("io", delete_file),
+    ):
+        assert direct_tool_allowed(profile, module_id, item)
+        assert not direct_tool_allowed(profile, module_id, item, parent_plan_mode=True)
+
+    @tool
+    def unknown() -> str:
+        """No policy."""
+        return "no"
+
+    assert not direct_tool_allowed(profile, "unknown", unknown)
+
+
+@pytest.mark.parametrize("no_python", [False, True])
+def test_cli_worker_binds_parent_tools_without_search(no_python: bool) -> None:
+    from giga_agent.core.agent.base import BaseAgent
+    from giga_agent.modules.io.module import IOModule
+    from giga_agent.modules.repl.module import ReplModule
+
+    modules = [SubagentsModule(), ReplModule(), IOModule()]
+    agent = SimpleNamespace(
+        all_modules=modules, _agent_modules=modules, _tools_cache={}, tools=[]
+    )
+    user = SimpleNamespace(id="cli-user", settings={})
+    config = {
+        "configurable": {
+            "subagent_id": "builtin:subagents:cli_worker",
+            "no_python_tool": no_python,
+            "runtime_resolver": SimpleNamespace(has_sandbox=False),
+        }
+    }
+    with (
+        patch(
+            "giga_agent.modules.subagents.module.get_settings",
+            return_value=SimpleNamespace(giga_agent_runtime="cli"),
+        ),
+        patch(
+            "giga_agent.subagents.execution.get_settings",
+            return_value=SimpleNamespace(giga_agent_runtime="cli"),
+        ),
+        patch(
+            "giga_agent.core.agent.base.get_thread_metadata",
+            new=AsyncMock(return_value={}),
+        ),
+    ):
+        agent.subagent_registry = AgentRegistry(agent)
+        tools = asyncio.run(BaseAgent.get_tools(agent, user, config=config))
+    names = {item.name for item in tools}
+    assert {
+        "shell",
+        "await_shell",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete_file",
+    } <= names
+    assert ("python" in names) is not no_python
+    assert "subtask" not in names
 
 
 @pytest.mark.parametrize(

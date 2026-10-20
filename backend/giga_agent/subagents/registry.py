@@ -50,6 +50,7 @@ class AgentDefinition:
     mcp_server_ids: tuple[uuid.UUID, ...] = ()
     allowed_tool_effects: tuple[str, ...] = ("read",)
     manifest_path: Path | None = None
+    inherit_parent_tools: bool = False
 
     def public_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -127,6 +128,7 @@ class AgentRegistry:
                     tools=manifest.tools,
                     examples=tuple(manifest.examples),
                     manifest_path=parsed.path,
+                    inherit_parent_tools=manifest.inherit_parent_tools,
                 )
         return definitions
 

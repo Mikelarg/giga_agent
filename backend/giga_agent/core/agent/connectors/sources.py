@@ -260,6 +260,8 @@ class RestrictedToolSource:
             return False
         if self._plan_mode:
             return effect is ToolEffect.READ
+        if self._profile.inherit_parent_tools:
+            return True
         if getattr(self._profile.definition, "source", "builtin") == "custom":
             return effect.value in self._profile.allowed_tool_effects
 
@@ -344,7 +346,7 @@ async def collect_sources(
             ((config or {}).get("configurable") or {}).get("subagent_parent_plan_mode")
         )
         for source in module_sources:
-            if module.id == "mcp":
+            if module.id == "mcp" and not execution.inherit_parent_tools:
                 server = getattr(source, "_server", None)
                 db_server = getattr(server, "db_server", None)
                 if db_server is None or db_server.id not in execution.mcp_server_ids:

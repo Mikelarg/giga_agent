@@ -85,6 +85,7 @@ class AgentManifest(BaseModel):
     modules: list[str] = Field(default_factory=list, max_length=64)
     connectors: list[str] = Field(default_factory=list, max_length=64)
     tools: AgentToolRules = Field(default_factory=AgentToolRules)
+    inherit_parent_tools: bool = False
     examples: list[str] = Field(default_factory=list, max_length=32)
 
     @field_validator("id")

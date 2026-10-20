@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -23,6 +23,7 @@ class AgentExecutionProfile:
     skill_names: frozenset[str]
     mcp_server_ids: frozenset[uuid.UUID]
     allowed_tool_effects: frozenset[str] = frozenset({"read"})
+    inherit_parent_tools: bool = False
 
 
 def configured_subagent_ref(config: RunnableConfig | None) -> str | None:
@@ -70,11 +71,18 @@ async def resolve_execution_profile(
         )
         if definition is None:
             raise ValueError(f"Subagent {ref!r} is unavailable or needs setup")
+        inherit_parent_tools = definition.inherit_parent_tools
+        if inherit_parent_tools:
+            definition = replace(
+                definition,
+                modules=tuple(module.id for module in agent.all_modules),
+            )
         return AgentExecutionProfile(
             definition=definition,
             skill_names=frozenset(skill.name for skill in definition.skills),
             mcp_server_ids=frozenset(),
             allowed_tool_effects=frozenset(definition.allowed_tool_effects),
+            inherit_parent_tools=inherit_parent_tools,
         )
     factory = await get_session_factory()
     async with factory() as session:
@@ -144,6 +152,8 @@ def direct_tool_allowed(
         return False
     if parent_plan_mode:
         return effect is ToolEffect.READ
+    if profile.inherit_parent_tools:
+        return True
     if getattr(profile.definition, "source", "builtin") == "custom":
         return effect.value in profile.allowed_tool_effects
 

@@ -441,10 +441,22 @@ class BaseAgent(BaseModel):
                 return [*cached, *await get_history_tools(user, config)]
             return cached
 
-        all_tools: list[BaseTool] = [] if execution is not None else list(self.tools)
+        all_tools: list[BaseTool] = (
+            list(self.tools)
+            if execution is None or execution.inherit_parent_tools
+            else []
+        )
         parent_plan_mode = bool(
             ((config or {}).get("configurable") or {}).get("subagent_parent_plan_mode")
         )
+        if execution is not None:
+            all_tools = [
+                item
+                for item in all_tools
+                if direct_tool_allowed(
+                    execution, "", item, parent_plan_mode=parent_plan_mode
+                )
+            ]
         for module in self._agent_modules:
             if execution is not None:
                 if module.id not in execution_module_ids(execution):

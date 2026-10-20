@@ -139,6 +139,8 @@ class SubagentsModule(BaseModule):
 
     def get_agents(self, **kwargs: Any) -> list[str]:
         _ = kwargs
+        if get_settings().giga_agent_runtime == "cli":
+            return ["agents/cli_worker/AGENT.md"]
         return [
             "agents/researcher/AGENT.md",
         ]

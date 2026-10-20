@@ -111,7 +111,9 @@ async def read_skill_manifest(
         execution = await resolve_execution_profile(
             agent, resolver.user, runtime.config
         )
-        if execution is None or name not in execution.skill_names:
+        if execution is None or (
+            not execution.inherit_parent_tools and name not in execution.skill_names
+        ):
             return _build_tool_result(
                 runtime=runtime,
                 content=f"Skill {name!r} is not allowed for this subagent",
