@@ -116,6 +116,7 @@ class TelegramCallbackHandlers:
                 file_data=[],
                 run_timeout=RUN_WAIT_TIMEOUT_SECONDS,
                 selected_button=selected_button,
+                sender=callback.from_user,
             )
             result = await self.message_tool_runtime.continue_run_until_ready(
                 message=message,
@@ -123,6 +124,8 @@ class TelegramCallbackHandlers:
                 thread_id=thread_id,
                 token=token,
                 result=result,
+                sender=callback.from_user,
+                memory_query=response_text,
                 run_timeout=RUN_WAIT_TIMEOUT_SECONDS,
             )
             if isinstance(result, dict) and result.get("messages"):

@@ -25,7 +25,7 @@ from giga_agent.channels.telegram.services.media import (
     TelegramMediaService,
     _convert_plotly_attachment,
 )
-from giga_agent.channels.telegram.runtime import build_memory_tags
+from giga_agent.channels.telegram.runtime import build_memory_config
 from giga_agent.channels.telegram.utils import (
     _build_message_tool_result_parts,
     _describe_uploaded_files,
@@ -236,6 +236,8 @@ class TelegramMessageToolRuntime:
         result: Any,
         run_timeout: int,
         reply_to_message_id: int | None = None,
+        sender: tg_types.User | None = None,
+        memory_query: str | None = None,
     ) -> dict[str, Any] | None:
         for _ in range(10):
             if not isinstance(result, dict):
@@ -270,6 +272,8 @@ class TelegramMessageToolRuntime:
                         file_data=[],
                         run_timeout=run_timeout,
                         auto_response=True,
+                        sender=sender,
+                        memory_query=memory_query,
                     )
                     continue
                 return None
@@ -333,6 +337,8 @@ class TelegramMessageToolRuntime:
         run_timeout: int,
         auto_response: bool = False,
         selected_button: str = "",
+        sender: tg_types.User | None = None,
+        memory_query: str | None = None,
     ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         response_tool_id = response_tool_call.get("id")
@@ -374,11 +380,11 @@ class TelegramMessageToolRuntime:
                     },
                 },
                 config={
-                    "configurable": {
-                        "memory_disabled": False,
-                        "memory_tags": build_memory_tags(message),
-                        "memory_show_global": False,
-                    },
+                    "configurable": build_memory_config(
+                        message,
+                        response_text if memory_query is None else memory_query,
+                        sender=sender,
+                    ),
                 },
             ),
             timeout=run_timeout,
@@ -422,6 +428,7 @@ class TelegramMessageToolRuntime:
             file_data.extend(extra_files)
         text = get_message_text(message)
         response_text = text or _describe_uploaded_files(file_data)
+        memory_query = "\n".join(filter(None, (text, reply_text)))
         message_context = build_message_context_payload(
             label="Входящее сообщение",
             message=message,
@@ -437,6 +444,7 @@ class TelegramMessageToolRuntime:
             response_tool_call=pending_tool_call,
             response_prompt=prompt,
             response_text=response_text,
+            memory_query=memory_query,
             file_data=file_data,
             message_context=message_context,
             attachment_paths=message_context["attachments"],
@@ -458,4 +466,5 @@ class TelegramMessageToolRuntime:
             result=result,
             run_timeout=run_timeout,
             reply_to_message_id=reply_to_message_id,
+            memory_query=memory_query,
         )

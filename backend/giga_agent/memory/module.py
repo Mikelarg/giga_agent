@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import re
+from html import escape
+from pathlib import PurePosixPath
 from typing import Any, List, Optional
 
 from fastapi import APIRouter
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 
+from giga_agent.conf import get_settings
 from giga_agent.core.agent.base import BaseAgent
 from giga_agent.core.agent.middleware import AgentMiddleware
 from giga_agent.core.agent.runtime_resolver import RuntimeResolver
 from giga_agent.core.agent.types import AgentState
 from giga_agent.core.logging import get_logger
 from giga_agent.core.module import BaseModule
+from giga_agent.memory.backends.base import MemoryFileDTO
 from giga_agent.memory.events import ensure_subscribed
 from giga_agent.memory.middleware import MemoryMiddleware
 from giga_agent.memory.paths import (
+    global_about_path,
     is_about_file,
     parse_memory_path,
+    tagged_about_path,
 )
 from giga_agent.memory.runtime import (
     build_memory_service,
@@ -23,17 +31,21 @@ from giga_agent.memory.runtime import (
     get_memory_tags,
     is_memory_disabled,
 )
+from giga_agent.memory.service import MemoryService
 from giga_agent.memory.tool import search_memories
 from giga_agent.models.users import UserShort
 from giga_agent.modules.io.memory_bridge import (
     ABOUT_GLOBAL_TEMPLATE,
+    ABOUT_TAGGED_TEMPLATE,
 )
 
 
 logger = get_logger(__name__)
 
 
-GLOBAL_FULL_CONTENT_BUDGET = 8000  # chars; bigger files go into the index only
+SENDER_FILE_LIMIT = 2
+FILE_CHAR_LIMIT = 2000
+ABOUT_CHAR_LIMIT = 8000
 
 
 class MemoryModule(BaseModule):
@@ -77,7 +89,7 @@ class MemoryModule(BaseModule):
         config=None,
         **kwargs: Any,
     ) -> str | None:
-        _ = user, agent, state, kwargs
+        _ = user, agent, kwargs
         if config is None:
             return None
         if is_memory_disabled(config):
@@ -101,11 +113,24 @@ class MemoryModule(BaseModule):
             logger.exception("MemoryModule.get_instructions: list failed")
             return None
 
-        return _render_memory_block(
+        configurable = config.get("configurable") or {}
+        query = configurable.get("memory_query")
+        if not isinstance(query, str):
+            query = next(
+                (
+                    str(m.text)
+                    for m in reversed((state or {}).get("messages", []))
+                    if isinstance(m, HumanMessage)
+                ),
+                "",
+            )
+        return await _render_memory_block(
+            service=service,
             files=files,
+            query=query.strip()[:4000],
+            username=configurable.get("memory_username"),
             tags=tags,
             show_global=show_global,
-            has_search=service.has_embeddings,
         )
 
     def get_middleware(self, **kwargs: Any) -> AgentMiddleware:
@@ -123,100 +148,135 @@ class MemoryModule(BaseModule):
         await ensure_subscribed()
 
 
-def _render_memory_block(
+def _sender_files(
+    files: list[MemoryFileDTO], username: str | None
+) -> list[tuple[MemoryFileDTO, str]]:
+    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_]+", username):
+        return []
+    nick = username.lower()
+    filename_match = re.compile(rf"(?:^|[-_.@]){re.escape(nick)}(?:$|[-_.])", re.I)
+    mention = re.compile(rf"(?<![a-z0-9_])@{re.escape(nick)}(?![a-z0-9_])", re.I)
+    ranked = []
+    for file in files:
+        name = PurePosixPath(file.path).stem.lower()
+        anchor = ""
+        if name in (nick, f"profile_{nick}", f"@{nick}"):
+            rank = 0
+        elif not name.startswith("profile_") and filename_match.search(name):
+            rank = 1
+        elif mention.search(file.description or ""):
+            rank = 2
+        elif match := mention.search(file.content):
+            rank = 3
+            anchor = match.group()
+        else:
+            continue
+        ranked.append((rank, file.path, file, anchor))
+    return [(file, anchor) for _, _, file, anchor in sorted(ranked)[:SENDER_FILE_LIMIT]]
+
+
+def _excerpt(content: str, limit: int, anchor: str = "") -> str:
+    if len(content) <= limit:
+        return content.strip()
+    pos = content.find(anchor) if anchor else 0
+    start = min(max(0, pos - limit // 4), len(content) - limit)
+    return (
+        ("… " if start else "")
+        + content[start : start + limit].strip()
+        + (" …" if start + limit < len(content) else "")
+    )
+
+
+async def _render_memory_block(
     *,
-    files,
+    service: MemoryService,
+    files: list[MemoryFileDTO],
+    query: str,
+    username: str | None,
     tags: list[str],
     show_global: bool,
-    has_search: bool,
 ) -> str:
-    parts: list[str] = []
-    parts.append("<memory>")
+    parts = [
+        "<memory>",
+        "ABOUT.md — главный файл памяти. Сверяйся с ним в первую очередь. "
+        "Храни в нём устойчивые сведения и ссылки на тематические файлы. "
+        "Дальше приведена подборка по текущему запросу и собеседнику. "
+        "Если для ответа нужны подробности, загрузи в контекст конкретный файл "
+        "через read_file по пути из ABOUT.md или подборки.",
+    ]
+    if service.has_embeddings:
+        parts.append(
+            "Если путь неизвестен, найди его через search_memories и прочитай нужный файл."
+        )
     parts.append(
-        "Память пользователя. Используй её, чтобы не переспрашивать одно и то же, "
-        "и активно обновляй (write_file/edit_file по путям /memories/...)."
+        "Обновляй память через write_file/edit_file. Каждый файл кроме ABOUT.md "
+        "должен иметь YAML-frontmatter с полем description (одна строка, до 200 символов). "
+        "Лимит файла — 200 строк."
     )
-    if has_search:
-        parts.append("Для семантического поиска по памяти есть тул search_memories.")
-    parts.append(
-        "Каждый файл памяти кроме ABOUT.md должен иметь YAML-frontmatter с полем "
-        "`description:` (одна строка, ≤200 символов). "
-        "Лимит размера файла памяти — 200 строк."
-    )
-
-    by_tag: dict[str | None, list] = {}
-    for f in files:
-        by_tag.setdefault(f.tag, []).append(f)
-
-    global_about = None
-    tagged_abouts: list = []
-    other_global: list = []
-    other_tagged: list = []
-
-    for tag, group in by_tag.items():
-        for f in group:
-            parsed = parse_memory_path(f.path)
-            if is_about_file(parsed):
-                if tag is None:
-                    global_about = f
-                else:
-                    tagged_abouts.append(f)
-            else:
-                if tag is None:
-                    other_global.append(f)
-                else:
-                    other_tagged.append(f)
-
-    if show_global:
-        if global_about is not None:
-            parts.append("<about>")
-            parts.append(global_about.content.strip())
-            parts.append("</about>")
+    abouts = {}
+    candidates = {}
+    for file in files:
+        if is_about_file(parse_memory_path(file.path)):
+            abouts[file.tag] = file
         else:
-            parts.append("<about>")
-            parts.append(ABOUT_GLOBAL_TEMPLATE.strip())
-            parts.append("</about>")
+            candidates[file.path] = file
 
-    for f in tagged_abouts:
-        parts.append(f'<about tag="{f.tag}">')
-        parts.append(f.content.strip())
-        parts.append("</about>")
-
-    # Files under visible tags — always shown in full.
-    for f in other_tagged:
+    for tag in ([None] if show_global else []) + tags:
+        file = abouts.get(tag)
+        if file:
+            path, content = file.path, file.content
+        elif tag is None:
+            path, content = global_about_path(), ABOUT_GLOBAL_TEMPLATE
+        else:
+            path, content = (
+                tagged_about_path(tag),
+                ABOUT_TAGGED_TEMPLATE.format(tag=tag),
+            )
         parts.append(
-            f'<file path="{f.path}" description="{(f.description or "").strip()}">'
+            f'<about path="{escape(path)}">\n{_excerpt(content, ABOUT_CHAR_LIMIT)}\n</about>'
         )
-        parts.append(f.content.strip())
-        parts.append("</file>")
 
-    # Global non-ABOUT files: full content if budget allows, otherwise index.
-    inline_global: list = []
-    indexed_global: list = []
-    if show_global:
-        budget = GLOBAL_FULL_CONTENT_BUDGET
-        for f in other_global:
-            size = len(f.content)
-            if size <= budget:
-                inline_global.append(f)
-                budget -= size
-            else:
-                indexed_global.append(f)
+    selected = _sender_files(list(candidates.values()), username)
+    for file, _ in selected:
+        del candidates[file.path]
 
-    for f in inline_global:
+    top_n = get_settings().giga_agent_memory_prompt_top_n
+    semantic_hits = []
+    if top_n and candidates and query and service.has_embeddings:
+        try:
+            semantic_hits = await service.search(
+                query,
+                n=top_n,
+                visible_tags=tags or None,
+                include_global=show_global,
+                distinct_files=True,
+                exclude_paths=tuple(f.path for f in abouts.values())
+                + tuple(f.path for f, _ in selected),
+            )
+        except Exception:
+            logger.exception("Memory prompt semantic search failed")
+
+    if semantic_hits:
+        for hit in semantic_hits:
+            if file := candidates.pop(hit.path, None):
+                selected.append((file, hit.snippet))
+    elif top_n and query and candidates:
+        # Existing installations can have files but no embedding runtime/index.
+        terms = set(re.findall(r"[^\W_]{3,}", query.casefold()))
+        matches = []
+        for file in candidates.values():
+            label = (
+                f"{PurePosixPath(file.path).stem} {file.description or ''}".casefold()
+            )
+            score = len(terms.intersection(re.findall(r"[^\W_]+", label)))
+            if score:
+                matches.append((-score, file.path))
+        selected.extend((candidates[path], "") for _, path in sorted(matches)[:top_n])
+
+    for file, anchor in selected:
         parts.append(
-            f'<file path="{f.path}" description="{(f.description or "").strip()}">'
+            f'<file path="{escape(file.path)}">\n{_excerpt(file.content, FILE_CHAR_LIMIT, anchor)}\n</file>'
         )
-        parts.append(f.content.strip())
-        parts.append("</file>")
-
-    if indexed_global:
-        parts.append("<index>")
-        for f in indexed_global:
-            desc = (f.description or "(без описания)").strip()
-            parts.append(f"- {f.path} — {desc}")
-        parts.append("</index>")
-
     parts.append("</memory>")
     return "\n".join(parts)
 

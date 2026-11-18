@@ -38,13 +38,28 @@ def get_thread_external_user_id(message: tg_types.Message) -> str | None:
     return str(message.from_user.id)
 
 
-def build_memory_tags(message: tg_types.Message) -> list[str]:
+def build_memory_tags(
+    message: tg_types.Message, *, sender: tg_types.User | None = None
+) -> list[str]:
     """Scope memory by chat (private → tg_user_<id>, group → tg_chat_<id>)."""
     chat = message.chat
     chat_type = getattr(chat, "type", None)
     if chat_type == "private":
-        user = message.from_user
+        user = sender or message.from_user
         if user is not None:
             return [f"tg_user_{user.id}"]
         return [f"tg_chat_{chat.id}"]
     return [f"tg_chat_{chat.id}"]
+
+
+def build_memory_config(
+    message: tg_types.Message, query: str, *, sender: tg_types.User | None = None
+) -> dict:
+    author = sender or message.from_user
+    return {
+        "memory_disabled": False,
+        "memory_tags": build_memory_tags(message, sender=author),
+        "memory_show_global": False,
+        "memory_username": getattr(author, "username", None),
+        "memory_query": query[:4000],
+    }

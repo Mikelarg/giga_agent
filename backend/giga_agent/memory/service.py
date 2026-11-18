@@ -387,6 +387,8 @@ class MemoryService:
         n: int,
         visible_tags: list[str] | None,
         include_global: bool,
+        distinct_files: bool = False,
+        exclude_paths: tuple[str, ...] = (),
     ) -> list[SearchHit]:
         if self._embedding_runtime is None:
             return []
@@ -396,8 +398,19 @@ class MemoryService:
         await self.reindex_changed()
 
         client, collection, _ = await self._ensure_collection()
-        embeddings = await self._embedding_runtime.get_embeddings()
-        vector = await embeddings.aembed_query(query)
+        # Model/tool rounds in a turn typically reuse the same retrieval query.
+        key = f"memory:query:{self._owner_id}:{self._embedding_id}:{_hash(query)}"
+        try:
+            vector = await cache.get(key)
+        except Exception:
+            vector = None
+        if vector is None:
+            embeddings = await self._embedding_runtime.get_embeddings()
+            vector = await embeddings.aembed_query(query)
+            try:
+                await cache.set(key, vector, expire=120)
+            except Exception:
+                pass
 
         must: list[qmodels.Condition] = [
             qmodels.FieldCondition(
@@ -429,17 +442,29 @@ class MemoryService:
                 min_should=qmodels.MinShould(conditions=scope_conditions, min_count=1),
             )
 
-        resp = await qdrant_call(
-            client,
-            "query_points",
+        if exclude_paths:
+            flt.must_not = [
+                qmodels.FieldCondition(
+                    key="path", match=qmodels.MatchAny(any=list(exclude_paths))
+                )
+            ]
+        params = dict(
             collection_name=collection,
             query=vector,
             query_filter=flt,
             limit=n,
-            with_payload=True,
+            with_payload=["path", "chunk_text"],
         )
+        if distinct_files:
+            resp = await qdrant_call(
+                client, "query_points_groups", group_by="path", group_size=1, **params
+            )
+            points = [group.hits[0] for group in resp.groups if group.hits]
+        else:
+            resp = await qdrant_call(client, "query_points", **params)
+            points = resp.points
         hits: list[SearchHit] = []
-        for point in resp.points:
+        for point in points:
             payload = point.payload or {}
             hits.append(
                 SearchHit(

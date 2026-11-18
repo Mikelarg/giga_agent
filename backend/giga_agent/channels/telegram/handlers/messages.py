@@ -19,7 +19,7 @@ from giga_agent.channels.telegram.message_context import (
     get_message_text,
 )
 from giga_agent.channels.telegram.message_tool import build_telegram_message_tool_schema
-from giga_agent.channels.telegram.runtime import build_memory_tags
+from giga_agent.channels.telegram.runtime import build_memory_config
 from giga_agent.channels.telegram.services.access import TelegramAccessService
 from giga_agent.channels.telegram.services.media import TelegramMediaService
 from giga_agent.channels.telegram.services.message_tool_runtime import (
@@ -317,6 +317,7 @@ class TelegramMessageHandlers:
                         [item["path"] for item in all_file_data],
                     )
 
+                memory_query = "\n".join(filter(None, (text, reply_text)))
                 content_parts = [
                     build_message_context(
                         label="Входящее сообщение",
@@ -378,9 +379,7 @@ class TelegramMessageHandlers:
                         input=run_input,
                         config={
                             "configurable": {
-                                "memory_disabled": False,
-                                "memory_tags": build_memory_tags(message),
-                                "memory_show_global": False,
+                                **build_memory_config(message, memory_query),
                                 # Migrate pre-existing threads to autonomous mode:
                                 # before_agent syncs this into thread metadata.
                                 "auto_approve": True,
@@ -397,6 +396,7 @@ class TelegramMessageHandlers:
                     result=result,
                     run_timeout=run_timeout,
                     reply_to_message_id=reply_to_message_id,
+                    memory_query=memory_query,
                 )
                 if result is None:
                     return

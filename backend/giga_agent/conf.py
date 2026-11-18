@@ -383,6 +383,10 @@ class Settings(BaseSettings):
         alias="GIGA_AGENT_ENABLE_MULTI_TOOL_USE_PROVIDERS",
     )
 
+    giga_agent_memory_prompt_top_n: int = Field(
+        5, alias="GIGA_AGENT_MEMORY_PROMPT_TOP_N", ge=0, le=20
+    )
+
     giga_agent_context_compaction_enabled: bool = Field(
         True, alias="GIGA_AGENT_CONTEXT_COMPACTION_ENABLED"
     )
