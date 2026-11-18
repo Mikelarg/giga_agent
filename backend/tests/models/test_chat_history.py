@@ -74,7 +74,9 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.engine.dispose()
 
-    async def _add(self, message_id: int, message: str, *, seconds: int = 0) -> None:
+    async def _add(
+        self, message_id: int, message: str, *, seconds: int = 0, **metadata
+    ) -> None:
         async with self.session_factory() as session:
             history = ChatHistoryRepository(session)
             await history.upsert(
@@ -84,6 +86,7 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
                 metadata={
                     "sender": {"id": "7", "username": "Ivan_Test"},
                     "content_type": "text",
+                    **metadata,
                 },
                 created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)
                 + timedelta(seconds=seconds),
@@ -172,6 +175,43 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["messages"][0]["message_id"], 2)
         self.assertEqual(second["messages"][0]["message_id"], 1)
         self.assertFalse(second["has_more"])
+
+    async def test_reply_context_uses_the_parent_even_outside_the_page(self) -> None:
+        author = {"id": "9", "first_name": "Марина"}
+        await self._add(1, "Вопрос " * 100, sender=author)
+        await self._add(2, "Вмешался бот")
+        await self._add(3, "Недостаточно", reply_to_message_id=1)
+        channel = {"id": "-55", "title": "Канал"}
+        await self._add(4, "", content_type="photo", sender_chat=channel)
+        await self._add(5, "Ответ на фото", reply_to_message_id=4)
+        runtime = types.SimpleNamespace(
+            config={"metadata": {"thread_id": "history-thread"}}
+        )
+        with patch(
+            "giga_agent.channels.telegram.chat_history.get_session_factory",
+            new=AsyncMock(return_value=self.session_factory),
+        ):
+            get, find = await get_history_tools(
+                types.SimpleNamespace(id=self.owner.id), runtime.config
+            )
+            page = await get.coroutine(runtime=runtime, message_ids=[3])
+            found = await find.coroutine(runtime=runtime, query="Недостаточно")
+            media = await get.coroutine(runtime=runtime, message_ids=[4, 5])
+        self.assertEqual(found["messages"], page["messages"])
+        [reply] = page["messages"]
+        self.assertEqual(reply["metadata"]["reply_to_message_id"], 1)
+        parent = reply["reply_to"]
+        self.assertEqual(parent["message_id"], 1)
+        self.assertEqual(parent["author"], author)
+        self.assertTrue(parent["text_preview"].startswith("Вопрос "))
+        self.assertTrue(parent["text_preview"].endswith("…"))
+        self.assertLess(len(parent["text_preview"]), len("Вопрос " * 100))
+        parent = media["messages"][0]["reply_to"]
+        self.assertEqual(parent["author"], channel)
+        self.assertEqual(
+            (parent["content_type"], parent["text_preview"]), ("photo", "")
+        )
+        self.assertIsNone(media["messages"][1]["reply_to"])
 
     async def test_find_uses_portable_literal_nfc_casefold_search(self) -> None:
         await self._add(1, "Cafe\u0301: 100% _ 'quoted'")
@@ -428,7 +468,7 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_scheduled_history_uses_only_its_single_approved_group(self) -> None:
-        await self._add(1, "Итоги группы")
+        await self._add(1, "Итоги группы", reply_to_message_id=2)
         other_contact = ChannelContact(
             bot_id=self.bot.id,
             external_chat_id="-1002",
@@ -500,6 +540,10 @@ class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
             found = await tools[1].coroutine(query="Итоги", runtime=runtime)
             self.assertEqual([row["message_id"] for row in messages["messages"]], [1])
             self.assertEqual([row["message_id"] for row in found["messages"]], [1])
+            self.assertEqual(
+                messages["messages"][0]["reply_to"],
+                {"message_id": 2, "available": False},
+            )
 
             # The scheduled thread cannot redirect its history access.
             metadata["history_target"]["external_chat_id"] = "-1002"
